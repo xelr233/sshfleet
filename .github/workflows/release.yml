@@ -1,0 +1,129 @@
+name: Release
+
+# 手动触发:在 Actions 页面点 "Run workflow",填写版本号(如 v0.2.0)。
+# 产物:windows/amd64 与 linux/amd64 的 sshf 可执行文件 + 校验和,挂到 GitHub Release。
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "发布版本号(标签名,如 v0.2.0)"
+        required: true
+        type: string
+      prerelease:
+        description: "标记为预发布(pre-release)"
+        required: false
+        default: false
+        type: boolean
+      draft:
+        description: "创建为草稿(draft)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write # 创建 Release 并上传产物所需
+
+jobs:
+  # 先跑测试,失败则不发版。
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test -race ./...
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+            archive: zip
+          - goos: linux
+            goarch: amd64
+            archive: tar.gz
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 交叉编译
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          ext=""
+          [ "${GOOS}" = "windows" ] && ext=".exe"
+          # 版本号注入 main.version(见 cmd/sshf/main.go);去掉标签的 v 前缀,
+          # 由 CLI 自行补上,避免出现 "vv0.2.0"。
+          ver="${VERSION#v}"
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${ver}" \
+            -o "dist/sshf${ext}" ./cmd/sshf
+
+      - name: 打包
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          ARCHIVE: ${{ matrix.archive }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          name="sshf_${VERSION}_${GOOS}_${GOARCH}"
+          cp README.md dist/ 2>/dev/null || true
+          if [ "${ARCHIVE}" = "zip" ]; then
+            (cd dist && zip -q -r "../${name}.zip" .)
+          else
+            (cd dist && tar -czf "../${name}.tar.gz" .)
+          fi
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: sshf-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            sshf_${{ inputs.version }}_${{ matrix.goos }}_${{ matrix.goarch }}.${{ matrix.archive }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载全部产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: 生成校验和
+        working-directory: artifacts
+        run: |
+          set -euo pipefail
+          sha256sum * > sha256sums.txt
+          cat sha256sums.txt
+
+      - name: 创建 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version }}
+          name: ${{ inputs.version }}
+          prerelease: ${{ inputs.prerelease }}
+          draft: ${{ inputs.draft }}
+          generate_release_notes: true
+          files: |
+            artifacts/*.zip
+            artifacts/*.tar.gz
+            artifacts/sha256sums.txt
