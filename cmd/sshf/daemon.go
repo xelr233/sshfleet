@@ -21,7 +21,7 @@ func newStartCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "start",
 		Short: "启动 sshfleet daemon(监听 127.0.0.1,写 token 文件)",
-		Args:  cobra.NoArgs,
+		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if daemon.IsRunning() {
 				return fmt.Errorf("daemon 已在运行(PID %d);如需重启请先 `sshf stop`", mustPID())
@@ -107,7 +107,7 @@ func newStopCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "stop",
 		Short: "停止 daemon",
-		Args:  cobra.NoArgs,
+		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			pid, err := daemon.ReadPID()
 			if err != nil {
@@ -135,7 +135,7 @@ func newStatusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
 		Short: "查看 daemon 版本、连接池状态、活动任务",
-		Args:  cobra.NoArgs,
+		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := ensureDaemon(cmd)
 			if err != nil {

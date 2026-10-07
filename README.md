@@ -60,8 +60,9 @@
 
 ```
 sshfleet/
-├── cmd/sshf/            # cobra 入口：root / start / stop / status / hosts / exec / batch /
-│                        # distribute / session / tail / upload / download / mcp
+├── cmd/sshf/            # cobra 入口：root / start / stop / status / hosts（含 import）/
+│                        # exec / batch / distribute / session / tail / upload / download /
+│                        # completion / mcp；CLI 全量中文界面与 help
 ├── internal/
 │   ├── daemon/          # 监听、token 鉴权、请求路由、订阅推送、空闲退出、PID/端口文件
 │   ├── protocol/        # 请求/响应/事件结构体、JSON 行编解码（daemon 与客户端共用）
@@ -74,8 +75,11 @@ sshfleet/
 │   ├── encoding/        # 远端输出编码（UTF-8 优先、GBK 兜底）
 │   ├── auth/            # 密钥加载（OpenSSH 格式）、agent 适配（unix socket / winio pipe）
 │   ├── config/          # hosts.yaml 加载校验、token/PID 文件路径（~/.sshfleet/）
+│   ├── sshconfig/       # OpenSSH ~/.ssh/config 子集解析（供 hosts import 导入）
 │   ├── sshtest/         # 测试专用进程内 SSH 服务端（exec/shell/tail/sftp + 限速）
 │   └── mcp/             # MCP server（未实现，占位）
+├── .github/workflows/   # release.yml：手动触发，发布 windows/amd64 + linux/amd64
+├── .agents/skills/sshf/ # 供 AI Agent 使用的 skill（SKILL.md + references/cli-reference.md）
 ├── go.mod
 └── README.md
 ```
@@ -114,14 +118,29 @@ CLI 子命令与 MCP 工具一一映射到上述协议命令，**不在 CLI/MCP 
 ```
 sshf start / stop / status
 sshf hosts add/list/rm/test           # test = 对清单逐一连通性检查
+sshf hosts import [--file ~/.ssh/config] [--group g] [--overwrite] [--dry-run]
+                                      # 从 OpenSSH 配置批量导入主机
 sshf exec <host> <cmd>
 sshf batch [--host h]... [--group g] [-c 8] <cmd>   # 输出：逐机块 + 汇总统计
 sshf distribute <local> <remote> [--host h]... [--group g] [--concurrency 16] [--resume]
 sshf upload <host> <local> <remote> / download <host> <remote> <local>
 sshf session open <host> / send <id> <input> / close <id> / list
 sshf tail <host> <file> [--task <id> --since <seq>]  # --task/--since 用于断线重连
+sshf completion <bash|zsh|fish|powershell>           # 生成补全脚本
 sshf mcp                              # stdio 模式启动 MCP server（未实现，占位）
 ```
+
+CLI 界面（用法/帮助/补全/参数与选项报错）与命令说明均为中文；`sshf --help` 即完整中文命令树。
+
+> **给 AI Agent**：仓库内置 skill `.agents/skills/sshf/`（`SKILL.md` + `references/cli-reference.md`），可在支持 skills 的 Agent（如 ZCode）中直接指导多机运维；`references/cli-reference.md` 也适合人读的命令/标志/字段权威参考。
+
+### 7.1 从 OpenSSH 配置导入
+
+`sshf hosts import` 解析 `~/.ssh/config` 的一个子集并写入 hosts.yaml：
+
+- **支持**：`Host`（具体别名，含一个块内多别名）、`HostName`、`User`、`Port`、`IdentityFile`；遵循 OpenSSH「首个取值生效」规则，识别文件开头全局块与 `Host *` 通配、`!` 否定。
+- **不支持**（告警并跳过其效果）：通配别名 `Host *`（无法展开为具名主机）、`Include`、`Match`、`ProxyJump`/`ProxyCommand`。
+- 未写 `HostName` 时用别名作为地址（同 `ssh` 语义）。已存在同名主机默认**跳过**，`--overwrite` 覆盖，`--dry-run` 只预览。
 
 ## 8. GoSSHa 代码参考指引
 
@@ -165,7 +184,9 @@ sshf mcp                              # stdio 模式启动 MCP server（未实�
 | M5 | MCP server（stdio） | ⏸ 暂缓（按需求判定非必要） | — |
 | M6 | upload/download、hosts test、GBK 解码 | ✓ 部分 | `9ad9643` |
 
-**测试**：105 项通过，`-race` 干净，三平台交叉编译通过。
+**测试**：126 项通过，`-race` 干净，三平台交叉编译通过。
+
+**里程碑后增补（非里程碑项）**：CLI 全量中文化（用法/帮助/补全/参数与选项报错）、`hosts import`（从 `~/.ssh/config` 导入，`internal/sshconfig`）、GitHub Actions 手动发布工作流（见下「构建与发布」）。
 
 ### 实现说明与原案的差异
 
@@ -175,7 +196,7 @@ sshf mcp                              # stdio 模式启动 MCP server（未实�
 - **distribute 扇出（M3）**：未用 `io.Pipe`（无缓冲，慢机经广播器会拖住快机），改用**带预读窗口（4 MiB）的有界内存管道**；并发度只限制建连、不限制消费（限制消费会反压广播器而死锁）。
 - **session（M4）**：`open` 时先请求 PTY —— Windows OpenSSH 对非 PTY 的 shell 请求会直接断开；`Close` 先关 stdin 并给收尾设上限，避免个别 sshd 不回 exit-status 时把请求挂死。
 - **GBK 解码（M4/M6）**：`internal/encoding.ToUTF8`，UTF-8 优先、GBK 兜底，应用于 exec / session / tail 输出。
-- **M6 按需求跳过**：`--no-daemon` 直连模式、交叉编译脚本、goreleaser。
+- **M6 按需求跳过**：`--no-daemon` 直连模式、goreleaser。（三平台交叉编译已可用；发布由 §9「构建与发布」的 GitHub Actions 手动工作流完成。）
 - **M5 暂缓**：`cmd/sshf/mcp.go` 与 `internal/mcp/doc.go` 保留 `TODO(M5)` 占位；`internal/protocol` 已是 CLI/MCP 共用契约，实现 MCP 只需映射协议命令，不涉及 SSH 逻辑。
 
 ### 验收方式
@@ -183,10 +204,20 @@ sshf mcp                              # stdio 模式启动 MCP server（未实�
 - **进程内**：`internal/sshtest` 提供进程内 SSH 服务端（exec / 持久 shell / tail 流 / SFTP + 入站限速），覆盖连接复用、断线重连并计数、channel 限流、batch 并发上限、distribute「慢机不阻塞快机」、tail 断线重连不丢事件、session `cd` 延续等。
 - **真实机**：本机 OpenSSH `sshd` 为 SYSTEM 服务、不可随意重启或另起实例，故用 `gost` 把**同一个 sshd** 代理成多个本地端口当多机（`2201`/`2202` 全速，`2203` 加 `limiter=1MB` 模拟慢机）。注意该 sshd 的 `sshd_config` 需含 `Subsystem sftp sftp-server.exe` 才能使用 SFTP。
 
+### 构建与发布
+
+```bash
+go build ./...                                   # 本机构建
+go test -race ./...                              # 全量测试
+go build -trimpath -ldflags "-s -w -X main.version=0.2.0" -o dist/sshf ./cmd/sshf
+```
+
+发布走 **GitHub Actions 手动触发**（`.github/workflows/release.yml`）：在仓库 Actions 页选 `Release` → `Run workflow`，填写版本号（如 `v0.2.0`），可选 pre-release / draft。流水线先跑 `go vet` + `go test -race`，再交叉编译 **windows/amd64** 与 **linux/amd64**（`CGO_ENABLED=0`），打包为 `zip`/`tar.gz` 并生成 `sha256sums.txt`，最后用 `softprops/action-gh-release` 创建 Release 并附上产物。
+
 ### 剩余工作
 
 - **M5 — MCP server**：官方 Go SDK，stdio，工具映射 §6 全部命令。验收：在 MCP 客户端（如 ZCode）中完成「对 group 执行命令 → 分发文件 → 查询进度」闭环。
-- known_hosts 校验；`--no-daemon` 直连；打包（交叉编译 + goreleaser）。
+- known_hosts 校验；`--no-daemon` 直连；darwin/arm64 发布目标（当前 Release 只发 windows/linux amd64）。
 
 ## 10. 风险与已知坑（开发中随时对照）
 

@@ -33,6 +33,8 @@ CLI 是无状态薄客户端:连接本机 daemon(未运行时自动拉起),
 		newTailCmd(),
 		newMCPCmd(),
 	)
+	// 覆盖 cobra 自动生成的英文界面(用法/帮助/补全/默认标志)。
+	localize(root)
 	return root
 }
 

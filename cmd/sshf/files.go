@@ -12,7 +12,7 @@ func newUploadCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "upload <host> <local> <remote>",
 		Short: "SFTP 单机上传(带进度)",
-		Args:  cobra.ExactArgs(3),
+		Args:  exactArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runSFTPTransfer(cmd, protocol.CmdSFTPPut, args[0], args[1], args[2])
 		},
@@ -23,7 +23,7 @@ func newDownloadCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "download <host> <remote> <local>",
 		Short: "SFTP 单机下载(带进度)",
-		Args:  cobra.ExactArgs(3),
+		Args:  exactArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runSFTPTransfer(cmd, protocol.CmdSFTPGet, args[0], args[2], args[1])
 		},

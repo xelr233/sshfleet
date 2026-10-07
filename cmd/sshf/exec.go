@@ -19,7 +19,7 @@ func newExecCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "exec <host> <cmd>",
 		Short: "单机执行命令,回 stdout/stderr/exit code",
-		Args:  cobra.ExactArgs(2),
+		Args:  exactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := ensureDaemon(cmd)
 			if err != nil {
@@ -100,7 +100,7 @@ func newBatchCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "batch [--host h]... [--group g] <cmd>",
 		Short: "多机并发执行,输出逐机块 + 汇总统计",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(hosts) == 0 && group == "" {
 				return fmt.Errorf("batch: 需指定 --host 或 --group")

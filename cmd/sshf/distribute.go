@@ -29,7 +29,7 @@ distribute <local> <host> <remote> 指定单台。
 
 分发是 daemon 中的长任务:命令会持续查询进度并在结束时给出逐机汇总。
 失败机器可用 --resume 从已传 offset 续传。`,
-		Args: cobra.RangeArgs(2, 3),
+		Args: rangeArgs(2, 3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			local := args[0]
 			remote := args[len(args)-1]

@@ -30,7 +30,7 @@ func newSessionOpenCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "open <host>",
 		Short: "打开会话,返回 session_id(会话存活于 daemon)",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := ensureDaemon(cmd)
 			if err != nil {
@@ -57,7 +57,7 @@ func newSessionSendCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "send <id> <input>",
 		Short: "向会话写入输入,回本次输出",
-		Args:  cobra.MinimumNArgs(2),
+		Args:  minArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			input := strings.Join(args[1:], " ")
 			if newline {
@@ -91,7 +91,7 @@ func newSessionCloseCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "close <id>",
 		Short: "关闭会话",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := ensureDaemon(cmd)
 			if err != nil {
@@ -154,7 +154,7 @@ func newTailCmd() *cobra.Command {
 首次跟随:sshf tail <host> <file>,记下输出的 #seq。
 断线后重连:sshf tail --task <task_id> --since <最后收到的 seq>,
 从环形缓冲补回缺失的行,不丢事件。`,
-		Args: cobra.RangeArgs(0, 2),
+		Args: rangeArgs(0, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if taskID == "" && len(args) != 2 {
 				return fmt.Errorf("tail: 首次跟随需 <host> <file>,重连需 --task <id>")

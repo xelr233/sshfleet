@@ -22,6 +22,7 @@ func newHostsCmd() *cobra.Command {
 		newHostsListCmd(),
 		newHostsRmCmd(),
 		newHostsTestCmd(),
+		newHostsImportCmd(),
 	)
 	return cmd
 }
@@ -36,7 +37,7 @@ func newHostsAddCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "add <name>",
 		Short: "添加主机(缺失字段交互式补全)",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
 
@@ -103,7 +104,7 @@ func newHostsListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "列出主机与分组",
-		Args:  cobra.NoArgs,
+		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path, err := resolveConfigPath()
 			if err != nil {
@@ -155,7 +156,7 @@ func newHostsRmCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "rm <name>",
 		Short: "删除主机(同步清理分组引用)",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
 			f, err := loadConfig()

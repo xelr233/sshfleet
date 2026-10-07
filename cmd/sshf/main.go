@@ -27,6 +27,8 @@ func main() {
 		os.Exit(ec.code)
 	}
 
-	fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	// 打印前把 cobra/pflag 的英文报错本地化;此处已过 exitCodeError 分支,
+	// 包装错误不会影响退出码判定。
+	fmt.Fprintf(os.Stderr, "错误: %v\n", localizeError(err))
 	os.Exit(1)
 }
