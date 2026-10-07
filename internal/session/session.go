@@ -10,6 +10,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -128,6 +129,12 @@ func (s *Session) Close() error {
 	}
 	_ = s.stdinPipe.Close()
 	err := s.sess.Close()
+	// 关 stdin 后远端 shell 可能已先行退出并关闭通道,某些平台(如 Linux 的
+	// 原生 sshd)此时 sess.Close() 会回一个 EOF —— 会话仍处于拆除中,这不是
+	// 失败,不应向上层报错。
+	if err != nil && errors.Is(err, io.EOF) {
+		err = nil
+	}
 	select {
 	case <-s.ended:
 	case <-time.After(closeGrace):
