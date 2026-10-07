@@ -12,11 +12,19 @@ import (
 	"github.com/xelr233/sshfleet/internal/exec"
 	"github.com/xelr233/sshfleet/internal/pool"
 	"github.com/xelr233/sshfleet/internal/protocol"
+	"github.com/xelr233/sshfleet/internal/session"
+	"github.com/xelr233/sshfleet/internal/tail"
 )
 
-// EmitFunc 由 daemon 注入,用于把任务进度事件推回发起请求的那条连接。
-// 事件写失败(如客户端已断开)不应中断任务,调用方只记日志。
-type EmitFunc func(event string, data any) error
+// Conn 是 router 对「发起请求的那条客户端连接」所需的最小能力:推送事件、
+// 登记/注销连接级订阅。由 daemon 的 clientConn 实现。
+type Conn interface {
+	// Event 推送一条事件(以请求 id 关联)。失败(客户端已断开)不应中断任务。
+	Event(id uint64, event string, data any) error
+	// AddSub 登记连接级订阅;DelSub 取消。key 必须唯一(如 "tail:tail-1")。
+	AddSub(key string, cancel func())
+	DelSub(key string)
+}
 
 // Router 把协议请求路由到具体能力实现,并持有连接池与活动任务表。
 type Router struct {
@@ -24,6 +32,9 @@ type Router struct {
 	cfg     *config.File
 	version string
 	started time.Time
+
+	sessions *session.Manager
+	tails    *tail.Manager
 
 	// onTaskStart / onTaskEnd 供 daemon 统计活动任务(空闲退出判定用)。
 	onTaskStart func()
@@ -60,6 +71,8 @@ func NewRouter(p *pool.Pool, cfg *config.File, version string) *Router {
 		cfg:        cfg,
 		version:    version,
 		started:    time.Now(),
+		sessions:   session.NewManager(),
+		tails:      tail.NewManager(),
 		baseCtx:    ctx,
 		baseCancel: cancel,
 		tasks:      map[string]*taskEntry{},
@@ -86,6 +99,8 @@ func newPool(configPath string, logf func(string, ...any)) (*pool.Pool, *config.
 // Close 取消所有长任务并关闭连接池。
 func (r *Router) Close() {
 	r.baseCancel()
+	r.tails.StopAll()
+	r.sessions.CloseAll()
 	r.mu.Lock()
 	for _, t := range r.tasks {
 		if t.cancel != nil {
@@ -99,28 +114,46 @@ func (r *Router) Close() {
 }
 
 // Handle 处理单条请求,始终返回一个可写回的响应(错误也转成响应)。
-func (r *Router) Handle(ctx context.Context, req *protocol.Request, emit EmitFunc) *protocol.Response {
-	resp, err := r.route(ctx, req, emit)
+func (r *Router) Handle(ctx context.Context, req *protocol.Request, conn Conn) *protocol.Response {
+	resp, err := r.route(ctx, req, conn)
 	if err != nil {
 		return protocol.Fail(req.ID, protocol.CodeInternal, "%v", err)
 	}
 	return resp
 }
 
-func (r *Router) route(ctx context.Context, req *protocol.Request, emit EmitFunc) (*protocol.Response, error) {
+func (r *Router) route(ctx context.Context, req *protocol.Request, conn Conn) (*protocol.Response, error) {
 	switch req.Cmd {
 	case protocol.CmdStatus:
 		return protocol.OK(req.ID, r.status())
 	case protocol.CmdExec:
 		return r.exec(ctx, req)
 	case protocol.CmdBatch:
-		return r.batch(ctx, req, emit)
+		return r.batch(ctx, req, conn)
 	case protocol.CmdDistStart:
-		return r.distStart(ctx, req, emit)
+		return r.distStart(ctx, req, conn)
 	case protocol.CmdDistStatus:
 		return r.distStatus(req)
 	case protocol.CmdDistCancel:
 		return r.distCancel(req)
+	case protocol.CmdSFTPPut:
+		return r.sftpTransfer(ctx, req, conn, false)
+	case protocol.CmdSFTPGet:
+		return r.sftpTransfer(ctx, req, conn, true)
+	case protocol.CmdHostsTest:
+		return r.hostsTest(ctx, req)
+	case protocol.CmdSessionOpen:
+		return r.sessionOpen(ctx, req, conn)
+	case protocol.CmdSessionSend:
+		return r.sessionSend(req, conn)
+	case protocol.CmdSessionClose:
+		return r.sessionClose(req, conn)
+	case protocol.CmdSessionList:
+		return protocol.OK(req.ID, r.sessionList())
+	case protocol.CmdTailStart:
+		return r.tailStart(ctx, req, conn)
+	case protocol.CmdTailStop:
+		return r.tailStop(req, conn)
 	default:
 		return protocol.Fail(req.ID, protocol.CodeBadRequest, "未知命令 %q", req.Cmd), nil
 	}
@@ -203,7 +236,7 @@ func (r *Router) exec(ctx context.Context, req *protocol.Request) (*protocol.Res
 	})
 }
 
-func (r *Router) batch(ctx context.Context, req *protocol.Request, emit EmitFunc) (*protocol.Response, error) {
+func (r *Router) batch(ctx context.Context, req *protocol.Request, conn Conn) (*protocol.Response, error) {
 	var p protocol.BatchParams
 	if err := req.Bind(&p); err != nil {
 		return protocol.Fail(req.ID, protocol.CodeBadRequest, "%v", err), nil
@@ -251,8 +284,8 @@ func (r *Router) batch(ctx context.Context, req *protocol.Request, emit EmitFunc
 		}
 		res.Results = append(res.Results, pr)
 		// 逐机完成事件:让 MCP / 交互客户端可以边跑边展示,而不必等整批结束。
-		if emit != nil {
-			_ = emit(protocol.EventProgress, pr)
+		if conn != nil {
+			_ = conn.Event(req.ID, protocol.EventProgress, pr)
 		}
 	}
 	r.setTaskProgress(id, res.OK+res.Failed)
@@ -263,7 +296,7 @@ func (r *Router) batch(ctx context.Context, req *protocol.Request, emit EmitFunc
 //
 // 分发是长任务:进度通过 EventProgress 事件持续推回本连接,结果通过
 // dist_status 查询(或等待 EventDistDone)。
-func (r *Router) distStart(ctx context.Context, req *protocol.Request, emit EmitFunc) (*protocol.Response, error) {
+func (r *Router) distStart(ctx context.Context, req *protocol.Request, conn Conn) (*protocol.Response, error) {
 	var p protocol.DistStartParams
 	if err := req.Bind(&p); err != nil {
 		return protocol.Fail(req.ID, protocol.CodeBadRequest, "%v", err), nil
@@ -291,8 +324,8 @@ func (r *Router) distStart(ctx context.Context, req *protocol.Request, emit Emit
 		OnProgress: func(hp dist.HostProgress) {
 			// 每台机器到达终态(完成/失败)时推一次事件;过程中不刷屏,
 			// 需要实时进度的客户端改成轮询 dist_status。
-			if emit != nil && (hp.State == dist.StateDone || hp.State == dist.StateFailed) {
-				_ = emit(protocol.EventDistDone, toDistHostState(hp))
+			if conn != nil && (hp.State == dist.StateDone || hp.State == dist.StateFailed) {
+				_ = conn.Event(req.ID, protocol.EventDistDone, toDistHostState(hp))
 			}
 		},
 	})

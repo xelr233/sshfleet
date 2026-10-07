@@ -22,6 +22,7 @@ type Client struct {
 	writer *protocol.Writer
 
 	nextID atomic.Uint64 // 自增请求 id(同一连接可并发多个请求,响应按 id 关联)
+	closed chan struct{} // Close 时关闭,用于解除 Stream 中的阻塞读
 }
 
 // Dial 连接正在运行的 daemon:读取端口与 token 文件、建立 TCP 连接并完成 token 握手。
@@ -47,6 +48,7 @@ func DialAddr(port int, token string) (*Client, error) {
 		conn:   conn,
 		reader: protocol.NewReader(conn),
 		writer: protocol.NewWriter(conn),
+		closed: make(chan struct{}),
 	}
 	if err := c.handshake(token); err != nil {
 		conn.Close()
@@ -63,7 +65,14 @@ func (c *Client) handshake(token string) error {
 }
 
 // Close 关闭连接。
-func (c *Client) Close() error { return c.conn.Close() }
+func (c *Client) Close() error {
+	select {
+	case <-c.closed:
+	default:
+		close(c.closed)
+	}
+	return c.conn.Close()
+}
 
 // Do 发送一条请求并等待其响应(途中收到的事件被丢弃)。
 func (c *Client) Do(ctx context.Context, cmd protocol.Command, params any) (*protocol.Response, error) {
@@ -115,6 +124,53 @@ func (c *Client) DoEvents(ctx context.Context, cmd protocol.Command, params any,
 		return nil, ctx.Err()
 	case r := <-ch:
 		return r.resp, r.err
+	}
+}
+
+// Stream 发送一条请求后持续接收事件,直到 ctx 取消或连接结束。
+//
+// onEvent 收到每个事件;onResponse 在响应到达时调用一次(如 tail_start 返回的
+// task_id)。它是长驻订阅(tail / session 输出)的唯一读循环,故调用方用 conn
+// 时必须全程持有本 Client。返回时(onEvent 之外的)最后一个错误。
+func (c *Client) Stream(ctx context.Context, cmd protocol.Command, params any, onEvent func(*protocol.Event), onResponse func(*protocol.Response)) error {
+	id := c.nextID.Add(1)
+	req, err := protocol.NewRequest(id, cmd, params)
+	if err != nil {
+		return err
+	}
+	if err := c.writer.WriteRequest(req); err != nil {
+		return err
+	}
+	if err := c.writer.Flush(); err != nil {
+		return err
+	}
+
+	// ctx 取消时关闭连接,解除阻塞中的读。
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = c.conn.Close()
+		case <-c.closed:
+		}
+	}()
+
+	for {
+		resp, ev, err := c.reader.ReadReply()
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return err
+		}
+		if ev != nil {
+			if onEvent != nil {
+				onEvent(ev)
+			}
+			continue
+		}
+		if resp.ID == id && onResponse != nil {
+			onResponse(resp)
+		}
 	}
 }
 

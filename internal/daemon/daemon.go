@@ -255,6 +255,11 @@ type clientConn struct {
 	reader *protocol.Reader
 	writer *protocol.Writer
 	wmu    sync.Mutex // 串行化写回(README §8:并发请求的响应不可交错)
+
+	// 推送订阅(session/tail)。key 形如 "session:sess-1" / "tail:tail-1",
+	// value 是取消订阅函数;连接断开时统一取消,避免向死连接推送。
+	subMu sync.Mutex
+	subs  map[string]func()
 }
 
 // handshake 读取首行 token 并比对。失败即断开,不做任何响应,避免向未鉴权方泄露信息。
@@ -275,26 +280,30 @@ func (c *clientConn) handshake() error {
 
 // serve 读取请求并逐个分发处理。
 func (c *clientConn) serve() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	// 连接关闭或 daemon 退出时取消所有在途请求。
+	// 连接级 ctx 在连接断开时取消;请求各自派生,避免长驻订阅随请求返回而失效。
+	baseCtx, baseCancel := context.WithCancel(context.Background())
+	defer baseCancel()
+	// 连接关闭或 daemon 退出时取消所有在途请求/订阅。
 	go func() {
 		select {
 		case <-c.daemon.quit:
-			cancel()
-		case <-ctx.Done():
+			baseCancel()
+		case <-baseCtx.Done():
 		}
 	}()
 
 	for {
 		req, err := c.reader.ReadRequest()
 		if err != nil {
-			return // EOF 或读错误,连接结束
+			break // EOF 或读错误,连接结束
 		}
 		c.daemon.touch()
 		// 每个请求独立 goroutine,支持同连接并发请求(响应按 id 关联)。
-		go c.dispatch(ctx, req)
+		go c.dispatch(baseCtx, req)
 	}
+
+	// 连接结束:取消本连接的全部推送订阅(会话/ tail),防止向死连接写。
+	c.cancelSubs()
 }
 
 // dispatch 路由单条请求并把结果写回。
@@ -302,20 +311,7 @@ func (c *clientConn) serve() {
 // emit 把任务进度事件写回本连接(以请求 id 关联);事件与响应共用写锁,
 // 保证每条消息完整、不交错。写事件失败(客户端已断开)只记日志,不影响任务本身。
 func (c *clientConn) dispatch(ctx context.Context, req *protocol.Request) {
-	emit := func(event string, data any) error {
-		ev, err := protocol.NewEvent(req.ID, event, data)
-		if err != nil {
-			return err
-		}
-		c.wmu.Lock()
-		defer c.wmu.Unlock()
-		if err := c.writer.WriteEvent(ev); err != nil {
-			return err
-		}
-		return c.writer.Flush()
-	}
-
-	resp := c.daemon.router.Handle(ctx, req, emit)
+	resp := c.daemon.router.Handle(ctx, req, c)
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
 	if err := c.writer.WriteResponse(resp); err != nil {
@@ -324,5 +320,60 @@ func (c *clientConn) dispatch(ctx context.Context, req *protocol.Request) {
 	}
 	if err := c.writer.Flush(); err != nil {
 		c.daemon.opts.Logf("daemon: 刷写响应失败: %v", err)
+	}
+}
+
+// Event 实现 router.Conn:把事件写回本连接(以请求 id 关联),并发安全。
+func (c *clientConn) Event(id uint64, event string, data any) error {
+	ev, err := protocol.NewEvent(id, event, data)
+	if err != nil {
+		return err
+	}
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	if err := c.writer.WriteEvent(ev); err != nil {
+		return err
+	}
+	return c.writer.Flush()
+}
+
+// AddSub 实现 router.Conn:登记连接级订阅(会话输出 / tail 行)。
+func (c *clientConn) AddSub(key string, cancel func()) { c.addSub(key, cancel) }
+
+// DelSub 实现 router.Conn:取消并移除一个订阅。
+func (c *clientConn) DelSub(key string) { c.delSub(key) }
+
+// addSub 登记一个连接级订阅(会话输出 / tail 行)。key 必须唯一。
+func (c *clientConn) addSub(key string, cancel func()) {
+	c.subMu.Lock()
+	if c.subs == nil {
+		c.subs = map[string]func(){}
+	}
+	if old, ok := c.subs[key]; ok {
+		old() // 同 key 重复订阅时先取消旧的,避免泄漏
+	}
+	c.subs[key] = cancel
+	c.subMu.Unlock()
+}
+
+// delSub 取消并移除一个订阅。
+func (c *clientConn) delSub(key string) {
+	c.subMu.Lock()
+	cancel, ok := c.subs[key]
+	delete(c.subs, key)
+	c.subMu.Unlock()
+	if ok {
+		cancel()
+	}
+}
+
+// cancelSubs 取消本连接的全部订阅(连接断开时调用)。
+func (c *clientConn) cancelSubs() {
+	c.subMu.Lock()
+	subs := c.subs
+	c.subs = nil
+	c.subMu.Unlock()
+	for _, cancel := range subs {
+		cancel()
 	}
 }

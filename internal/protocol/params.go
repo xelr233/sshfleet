@@ -137,6 +137,33 @@ type SFTPResult struct {
 	Err      string `json:"err,omitempty"`
 }
 
+// SFTPProgress 是 sftp_put / sftp_get 的进度事件负载(EventProgress)。
+type SFTPProgress struct {
+	Host  string `json:"host"`
+	Bytes int64  `json:"bytes"` // 已传字节
+	Total int64  `json:"total"` // 总字节(<=0 表示未知)
+}
+
+// ---- hosts test ----
+
+// HostsTestParams 是 hosts_test 的参数:要检查的主机集合。
+type HostsTestParams struct {
+	Sel HostSel `json:"sel"`
+}
+
+// HostsTestResult 是逐机连通性检查结果。
+type HostsTestResult struct {
+	Hosts []HostTestState `json:"hosts"`
+}
+
+// HostTestState 是单台主机的连通性结果。
+type HostTestState struct {
+	Host    string `json:"host"`
+	OK      bool   `json:"ok"`
+	Latency string `json:"latency,omitempty"` // 建连(含认证)耗时
+	Err     string `json:"err,omitempty"`
+}
+
 // ---- session ----
 
 // SessionOpenParams 是 session_open 的参数。
@@ -155,6 +182,13 @@ type SessionOpenResult struct {
 type SessionSendParams struct {
 	SessionID string `json:"session_id"`
 	Input     string `json:"input"`
+}
+
+// SessionOutput 是会话输出的推送事件负载(EventOutput)。
+// 会话输出可能很长,故用事件流式推送而非塞进响应(README §5.2)。
+type SessionOutput struct {
+	SessionID string `json:"session_id"`
+	Data      string `json:"data"`
 }
 
 // SessionCloseParams 是 session_close 的参数。
@@ -181,11 +215,23 @@ type SessionInfo struct {
 type TailStartParams struct {
 	Host string `json:"host"`
 	Path string `json:"path"`
+	// TaskID 非空时重连到已有 tail 任务(而不是新建)。配合 Since 回放缓冲行。
+	TaskID string `json:"task_id,omitempty"`
+	// Since 只回放 seq > Since 的缓冲行,用于客户端断线重连不丢已推事件
+	// (README §9 M4 验收)。0 表示从头回放缓冲区内的所有行。
+	Since int64 `json:"since,omitempty"`
 }
 
 // TailStartResult 返回 tail 任务 id。
 type TailStartResult struct {
 	TaskID string `json:"task_id"`
+}
+
+// TailLine 是 tail 行推送事件负载(EventTailLine)。
+type TailLine struct {
+	TaskID string `json:"task_id"`
+	Seq    int64  `json:"seq"`
+	Line   string `json:"line"`
 }
 
 // TailStopParams 是 tail_stop 的参数。

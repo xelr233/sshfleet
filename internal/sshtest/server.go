@@ -6,6 +6,7 @@
 package sshtest
 
 import (
+	"bufio"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/binary"
@@ -37,6 +38,8 @@ type Server struct {
 	Root string
 	// Throttle 非空时为 SFTP 写入注入限速(模拟慢机),见 throttle.go。
 	Throttle *Throttle
+	// TailInterval 是模拟 tail 流输出行的间隔;0 用 50ms。
+	TailInterval time.Duration
 
 	handshakes atomic.Int64 // 成功完成的 SSH 握手次数(用于断言连接复用)
 	active     atomic.Int64 // 当前活动会话数
@@ -191,6 +194,8 @@ func (s *Server) handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 			return
 		case "shell":
 			req.Reply(true, nil)
+			s.serveShell(ch)
+			return
 		case "subsystem":
 			if parseSubsystem(req.Payload) != "sftp" {
 				req.Reply(false, nil)
@@ -201,6 +206,76 @@ func (s *Server) handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 			return
 		default:
 			req.Reply(false, nil)
+		}
+	}
+}
+
+// serveShell 提供最小持久 shell 语义,用于会话测试://
+//
+//	每读一行(以 \n 结尾),回写 "prompt:$ <输入>\n" 与一行 "echo:<输入>\n"。
+//
+// 关键是它**保持**在同一个 channel 上,因此 §5.6 的「cd/env 延续」可以这样验证:
+// 发 "cd X" 再发 "pwd" 时,服务端记得上一条命令,回显里带上累计的目录状态。
+func (s *Server) serveShell(ch ssh.Channel) {
+	var (
+		mu    sync.Mutex
+		dir   string // 模拟的当前目录
+		lines int    // 已处理的行数,用于确认状态延续
+	)
+	mu.Lock()
+	dir = "/home/" + User
+	mu.Unlock()
+
+	sc := bufio.NewScanner(ch)
+	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for sc.Scan() {
+		cmd := strings.TrimSpace(sc.Text())
+		mu.Lock()
+		switch {
+		case cmd == "pwd":
+			out := dir + "\n"
+			ch.Write([]byte(out))
+		case strings.HasPrefix(cmd, "cd "):
+			arg := strings.TrimSpace(strings.TrimPrefix(cmd, "cd "))
+			if strings.HasPrefix(arg, "/") {
+				dir = arg
+			} else if arg == ".." {
+				if i := strings.LastIndex(dir, "/"); i > 0 {
+					dir = dir[:i]
+				}
+			} else if arg != "" {
+				dir = strings.TrimRight(dir, "/") + "/" + arg
+			}
+			ch.Write([]byte("cd ok -> " + dir + "\n"))
+		case cmd == "":
+			// 空行:忽略
+		default:
+			ch.Write([]byte("echo:" + cmd + "\n"))
+		}
+		lines++
+		ch.Write([]byte(fmt.Sprintf("[line %d]\n", lines)))
+		mu.Unlock()
+	}
+	ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
+	ch.Close()
+}
+
+// streamTail 模拟远端 `tail -f`:按固定间隔持续输出单调递增的行 "tick-N",
+// 直到通道关闭。用于验证 tail 的环形缓冲与断线重连不丢事件。
+func (s *Server) streamTail(ch ssh.Channel, reqs <-chan *ssh.Request) {
+	interval := s.TailInterval
+	if interval <= 0 {
+		interval = 50 * time.Millisecond
+	}
+	done := chanDone(reqs)
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for n := 1; ; n++ {
+		select {
+		case <-done:
+			return
+		case <-t.C:
+			fmt.Fprintf(ch, "tick-%d\n", n)
 		}
 	}
 }
@@ -235,6 +310,9 @@ func (s *Server) runExec(ch ssh.Channel, cmd string, reqs <-chan *ssh.Request) {
 	case cmd == "sleep":
 		// 不回复退出状态,让客户端阻塞(由测试主动取消)。
 		<-chanDone(reqs)
+		return
+	case strings.HasPrefix(cmd, "tail "):
+		s.streamTail(ch, reqs)
 		return
 	default:
 		ch.Write([]byte("echo:" + cmd + "\n"))

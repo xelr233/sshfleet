@@ -10,6 +10,8 @@ const (
 	CmdExec  Command = "exec"  // 单机执行
 	CmdBatch Command = "batch" // 多机并发执行
 
+	CmdHostsTest Command = "hosts_test" // 逐机连通性检查(README §7 hosts test)
+
 	CmdDistStart  Command = "dist_start"  // 分发,返回 task_id
 	CmdDistStatus Command = "dist_status" // 逐机进度
 	CmdDistCancel Command = "dist_cancel" // 取消分发
