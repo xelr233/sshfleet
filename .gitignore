@@ -24,3 +24,5 @@ token
 *~
 .DS_Store
 Thumbs.db
+# code index
+.codegraph/
