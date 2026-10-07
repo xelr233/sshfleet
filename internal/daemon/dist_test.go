@@ -157,6 +157,68 @@ func TestDaemonDistStartBadParams(t *testing.T) {
 	}
 }
 
+// dist_cancel 应中止进行中的分发,且任务状态转为 canceled。
+func TestDaemonDistCancel(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv(config.HomeEnv, home)
+
+	srv, err := sshtest.Start()
+	if err != nil {
+		t.Fatalf("启动服务器: %v", err)
+	}
+	t.Cleanup(srv.Close)
+	srv.Root = t.TempDir()
+	// 限速使分发足够慢,便于中途取消。
+	srv.Throttle = &sshtest.Throttle{BytesPerSec: 512 << 10}
+
+	cfgPath := filepath.Join(home, "hosts.yaml")
+	yaml := fmt.Sprintf("hosts:\n  h1:\n    addr: %s\n    port: %d\n    user: %s\n    password: %s\ngroups:\n  all:\n    - h1\n",
+		srv.Host(), srv.Port(), sshtest.User, sshtest.Password)
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d := New(Options{Addr: "127.0.0.1:0", ConfigPath: cfgPath, Version: "test", IdleTimeout: time.Hour})
+	if err := d.Listen(); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); d.Serve(ctx) }()
+	t.Cleanup(func() { cancel(); d.Stop(); <-done })
+
+	c, err := Dial()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	src, _ := writeTempFile(t, 8<<20)
+	resp, err := c.Do(context.Background(), protocol.CmdDistStart, protocol.DistStartParams{
+		Sel: protocol.HostSel{Group: "all"}, LocalPath: src, RemotePath: "big.bin",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var start protocol.DistStartResult
+	if err := resp.Bind(&start); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(150 * time.Millisecond) // 让传输启动
+	cresp, err := c.Do(context.Background(), protocol.CmdDistCancel, protocol.DistStatusParams{TaskID: start.TaskID})
+	if err != nil {
+		t.Fatalf("dist_cancel: %v", err)
+	}
+	if err := cresp.Err(); err != nil {
+		t.Fatalf("dist_cancel 错误: %v", err)
+	}
+
+	final := pollDistUntilDone(t, c, start.TaskID, 10*time.Second)
+	if final.State != "canceled" {
+		t.Fatalf("取消后状态应为 canceled, got %s", final.State)
+	}
+}
+
 // pollDistUntilDone 轮询 dist_status 直到任务不再是 running。
 func pollDistUntilDone(t *testing.T, c *Client, taskID string, timeout time.Duration) protocol.DistStatusResult {
 	t.Helper()

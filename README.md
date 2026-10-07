@@ -153,14 +153,20 @@ sshf mcp                              # stdio 模式启动 MCP server
 > 约定：每个里程碑独立提交（commit），完成标准 = 构建通过 + 验收项手动可验。开发环境为 Windows + Git Bash，交叉编译目标 `windows/amd64, linux/amd64, darwin/arm64`。
 
 **进度**：M0 ✅ 已完成（commit `faff127`：go.mod + cobra 命令树 + 目录骨架）。
-「第一梯队」✅ 已完成：`protocol` / `config` / `auth`（仅私钥文件部分，ssh-agent 留 M1）。M1–M6 均未开始，代码中未完成处已用 `TODO(Mx)` 标注，可用 `rg 'TODO\(M'` 汇总。
+「第一梯队」✅ 已完成：`protocol` / `config` / `auth`（仅私钥文件部分，ssh-agent 留 M1）。M4–M6 均未开始，代码中未完成处已用 `TODO(Mx)` 标注，可用 `rg 'TODO\(M'` 汇总。
 
-**M1 ✅ 已完成**：`config`（`shell` 字段）、`auth`（ssh-agent 双平台 + 降级、`ClientConfig` 组装）、`pool`（连接池：dial 去重 / keepalive / 退避重连 / 每主机 channel 限流）、`daemon`（TCP + token + JSON 行路由 + 空闲退出 + PID/端口/token 文件）、`exec`（单机 exec）、CLI 的 `start`/`stop`/`status`/`exec`（daemon 未运行时自动拉起）。验收方式：`internal/sshtest` 提供进程内 SSH 服务器，`pool`/`exec`/`daemon` 的集成测试覆盖「21 次取连接仅 1 次握手」「断线后自动重连并计数」「channel 上限」「超时」等；另有对真实 sshd（本机 `ssh win`）的手工验证。测试 63 项通过、`-race` 干净。
+**M1 ✅ 已完成**（commit `5823ce3`）：`config`（`shell` 字段）、`auth`（ssh-agent 双平台 + 降级、`ClientConfig` 组装）、`pool`（连接池：dial 去重 / keepalive / 退避重连 / 每主机 channel 限流）、`daemon`（TCP + token + JSON 行路由 + 空闲退出 + PID/端口/token 文件）、`exec`（单机 exec）、CLI 的 `start`/`stop`/`status`/`exec`（daemon 未运行时自动拉起）。验收方式：`internal/sshtest` 提供进程内 SSH 服务器，`pool`/`exec`/`daemon` 的集成测试覆盖「21 次取连接仅 1 次握手」「断线后自动重连并计数」「channel 上限」「超时」等；另有对真实 sshd（本机 `ssh win`）的手工验证。
 
 **M1 与 README 原案的差异**：
 - **默认 shell**：不硬编码 `/bin/bash -c`，默认原样交给目标机登录 shell；`shell` 字段 / `--shell` 可显式指定（见 §5.10）。这是原案未覆盖、但 Windows 目标必需的一点。
 - Host key 校验暂用 `InsecureIgnoreHostKey`（known_hosts 校验按原计划留 M6）。
 - `daemon --foreground` 对子进程用平台特定的 detach（Unix `setsid`，Windows `CREATE_NEW_PROCESS_GROUP + DETACHED_PROCESS`）。
+
+**M2 ✅ 已完成**（commit `9b9efff`）：`exec.RunBatch`（`errgroup` + `semaphore` 并发、逐机独立超时、结果按名排序聚合；单机失败不中断其它机器）、`daemon` 的 `batch` 路由（`group`/主机选择集解析 + 逐机 `EventProgress` 事件流）、CLI `batch`（`=== host ===` 逐机块 + 汇总统计，有失败则退出码 1）。验收：进程内测试断言「5 台 `-c 2` 时服务端峰值并发 ≤ 2」与「逐机超时不互相影响」；并已在真实环境（gost 多端口代理本机 sshd，见下）跑通 3 台并发。
+
+**M3 ✅ 已完成**（commit `81fd6e8`）：`internal/sftp`（单机 `Put`/`Get`，带节流进度回调、`Offset` 断点续传；每个会话占用一个 channel 名额）、`internal/dist`（**有界内存管道 + 广播者**：磁盘只读一次、chunk 扇出到每机独立管道，管道缓冲即流控边界，慢机只堵自己；`Task` 自包含 `Progress`/`Wait`/`Cancel`；并发度只限建连不限消费，避免反压死锁）、`daemon` 的 `dist_start`/`dist_status`/`dist_cancel`（异步长任务 + `EventDistDone` 事件 + 终态保留 10 分钟可查）、CLI `distribute`（`--host`/`--group`/`--concurrency`/`--resume`，轮询进度 + 逐机汇总）。验收：进程内 `TestSlowHostDoesNotBlockOthers` 直接断言「限速慢机完成前，快机均已完成且内容一致」；真实环境 8 MiB 分发 3 台，限速机（~1 MB/s）仍在 43% 时另两台已 100% 完成，md5 校验一致；`--resume` 从远端半截文件续传后 md5 一致。
+
+**验收环境（M2/M3 真实节）**：本机 OpenSSH `sshd` 为 SYSTEM 服务、不可随意重启或另起实例，故用 `E:\gost_3.3.0_windows_amd64\gost.exe` 把**同一个 sshd** 代理成多个本地端口当作多机 —— `127.0.0.1:2201`/`2202` 全速，`2203` 加 `limiter=1MB` 模拟慢机；`hosts.yaml` 里 `sim1/sim2/sim3` 指向这三个端口。注意：该 sshd 的 `C:\ProgramData\ssh\sshd_config` 原本缺 `Subsystem sftp sftp-server.exe`，需补上并重启 sshd 后 SFTP 才可用。测试总数 87 项，`-race` 干净，三平台交叉编译通过。
 
 **M0 — 骨架**
 初始化 go.mod、cobra 命令树、目录结构、CI 可选。验收：`sshf --help` 完整命令树。
