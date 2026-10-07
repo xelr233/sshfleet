@@ -9,6 +9,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/xelr233/sshfleet/internal/encoding"
 	"github.com/xelr233/sshfleet/internal/pool"
 )
 
@@ -60,6 +61,10 @@ func Run(ctx context.Context, p *pool.Pool, hostName, command string, timeout ti
 	start := time.Now()
 	err = runOnConn(ctx, conn.Client(), inv, res)
 	res.Duration = time.Since(start)
+
+	// 远端可能是 Windows(GBK 输出):按 UTF-8 优先、GBK 兜底解码(README §5.9)。
+	res.Stdout = encoding.ToUTF8([]byte(res.Stdout))
+	res.Stderr = encoding.ToUTF8([]byte(res.Stderr))
 
 	if err != nil {
 		// 连接层错误:交给调用方决定是否重试;连接本身由 pool 的 watch 判定失效。

@@ -243,3 +243,41 @@ func pollDistUntilDone(t *testing.T, c *Client, taskID string, timeout time.Dura
 	t.Fatalf("等待分发完成超时,最后状态: %+v", last)
 	return last
 }
+
+// hosts_test:可达主机 OK,不可达主机 FAIL(逐机结果)。
+func TestDaemonHostsTest(t *testing.T) {
+	d, names, _ := startDistDaemon(t, 2)
+	// 再注入一台不可达主机(端口 1),并加入组。
+	cfg := d.router.cfg
+	_ = cfg.Add(&config.Host{Name: "dead", Addr: "127.0.0.1", Port: 1, User: "u", Password: "p"})
+	_ = cfg.AddToGroup("all", "dead")
+
+	c, err := Dial()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	resp, err := c.Do(context.Background(), protocol.CmdHostsTest, protocol.HostsTestParams{
+		Sel: protocol.HostSel{Group: "all"},
+	})
+	if err != nil {
+		t.Fatalf("hosts_test: %v", err)
+	}
+	var res protocol.HostsTestResult
+	if err := resp.Bind(&res); err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]protocol.HostTestState{}
+	for _, h := range res.Hosts {
+		byName[h.Host] = h
+	}
+	for _, name := range names {
+		if !byName[name].OK {
+			t.Fatalf("主机 %s 应可达: %+v", name, byName[name])
+		}
+	}
+	if byName["dead"].OK || byName["dead"].Err == "" {
+		t.Fatalf("不可达主机应 FAIL: %+v", byName["dead"])
+	}
+}

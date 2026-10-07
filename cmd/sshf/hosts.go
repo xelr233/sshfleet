@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/xelr233/sshfleet/internal/config"
+	"github.com/xelr233/sshfleet/internal/protocol"
 )
 
 func newHostsCmd() *cobra.Command {
@@ -174,11 +175,51 @@ func newHostsRmCmd() *cobra.Command {
 }
 
 func newHostsTestCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "test [name|group]...",
-		Short: "对清单逐一做连通性检查",
-		RunE:  notImplemented("hosts test", "M6"),
+	var group string
+	cmd := &cobra.Command{
+		Use:   "test [name...]",
+		Short: "对清单逐一做连通性检查(建连 + 认证)",
+		Args:  cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 && group == "" {
+				return fmt.Errorf("hosts test: 需指定主机名或 --group")
+			}
+			c, err := ensureDaemon(cmd)
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+
+			resp, err := doReq(c, cmd, protocol.CmdHostsTest, protocol.HostsTestParams{
+				Sel: protocol.HostSel{Hosts: args, Group: group},
+			})
+			if err != nil {
+				return err
+			}
+			var res protocol.HostsTestResult
+			if err := resp.Bind(&res); err != nil {
+				return err
+			}
+
+			out := cmd.OutOrStdout()
+			failed := 0
+			for _, h := range res.Hosts {
+				if h.OK {
+					fmt.Fprintf(out, "%-16s OK     %s\n", h.Host, h.Latency)
+				} else {
+					failed++
+					fmt.Fprintf(out, "%-16s FAIL   %s\n", h.Host, h.Err)
+				}
+			}
+			if failed > 0 {
+				fmt.Fprintf(out, "\n%d/%d 台不可达\n", failed, len(res.Hosts))
+				return &exitCodeError{code: 1}
+			}
+			return nil
+		},
 	}
+	cmd.Flags().StringVar(&group, "group", "", "目标分组")
+	return cmd
 }
 
 // groupsOf 返回某主机所属的分组名(已排序)。

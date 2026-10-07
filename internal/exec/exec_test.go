@@ -107,3 +107,15 @@ func TestRunUnknownShell(t *testing.T) {
 		t.Fatal("未知 shell 应报错")
 	}
 }
+
+// 远端 GBK 输出应被兜底解码为 UTF-8(README §5.9)。
+func TestRunDecodesGBKOutput(t *testing.T) {
+	p, _ := newTestPool(t)
+	res, err := Run(context.Background(), p, "h1", "gbk", 0, "")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Stdout != "中文\n" {
+		t.Fatalf("GBK 输出应解码为 UTF-8 中文, got %q", res.Stdout)
+	}
+}

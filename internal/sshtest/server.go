@@ -20,6 +20,8 @@ import (
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/transform"
 )
 
 // User / Password 是测试服务器接受的固定凭据。
@@ -307,6 +309,12 @@ func (s *Server) runExec(ch ssh.Channel, cmd string, reqs <-chan *ssh.Request) {
 	case cmd == "fail":
 		ch.Stderr().Write([]byte("boom\n"))
 		writeExitStatus(ch, 1)
+	case cmd == "gbk":
+		// 以 GBK 输出「中文」,用于验证远端输出解码(README §5.9)。
+		enc, _, _ := transform.Bytes(simplifiedchinese.GBK.NewEncoder(), []byte("中文"))
+		ch.Write(enc)
+		ch.Write([]byte("\n"))
+		writeExitStatus(ch, 0)
 	case cmd == "sleep":
 		// 不回复退出状态,让客户端阻塞(由测试主动取消)。
 		<-chanDone(reqs)
