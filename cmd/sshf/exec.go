@@ -90,15 +90,106 @@ type exitCodeError struct{ code int }
 func (e *exitCodeError) Error() string { return fmt.Sprintf("远端退出码 %d", e.code) }
 
 func newBatchCmd() *cobra.Command {
+	var (
+		hosts       []string
+		group       string
+		concurrency int
+		timeout     time.Duration
+		shell       string
+	)
 	cmd := &cobra.Command{
-		Use:   "batch <cmd>",
+		Use:   "batch [--host h]... [--group g] <cmd>",
 		Short: "多机并发执行,输出逐机块 + 汇总统计",
 		Args:  cobra.ExactArgs(1),
-		RunE:  notImplemented("batch", "M2"),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(hosts) == 0 && group == "" {
+				return fmt.Errorf("batch: 需指定 --host 或 --group")
+			}
+			c, err := ensureDaemon(cmd)
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+
+			// 单个客户端连接:先收到逐机进度事件(边跑边打),再收到汇总响应。
+			resp, err := c.DoEvents(cmd.Context(), protocol.CmdBatch, protocol.BatchParams{
+				Sel:         protocol.HostSel{Hosts: hosts, Group: group},
+				Command:     args[0],
+				Concurrency: concurrency,
+				Timeout:     timeout,
+				Shell:       shell,
+			}, func(ev *protocol.Event) {
+				if ev.Event != protocol.EventProgress {
+					return
+				}
+				var pr protocol.ExecResult
+				if err := ev.Bind(&pr); err != nil {
+					return
+				}
+				printExecBlock(cmd, &pr)
+			})
+			if err != nil {
+				return err
+			}
+			if err := resp.Err(); err != nil {
+				return err
+			}
+			var res protocol.BatchResult
+			if err := resp.Bind(&res); err != nil {
+				return err
+			}
+
+			out := cmd.OutOrStdout()
+			fmt.Fprint(out, "\n=== 汇总 ===\n")
+			fmt.Fprintf(out, "总计 %d 台,成功 %d,失败 %d,耗时 %s\n", res.Total, res.OK, res.Failed, res.Elapsed)
+			if res.Failed > 0 {
+				fmt.Fprintf(out, "失败机器: %s\n", strings.Join(failedHosts(res.Results), ", "))
+				return &exitCodeError{code: 1}
+			}
+			return nil
+		},
 	}
-	cmd.Flags().StringSlice("host", nil, "目标主机(可多次)")
-	cmd.Flags().String("group", "", "目标分组(hosts.yaml 中的 group)")
-	cmd.Flags().IntP("concurrency", "c", 5, "并发度")
-	cmd.Flags().DurationP("timeout", "t", 0, "单机超时")
+	cmd.Flags().StringSliceVar(&hosts, "host", nil, "目标主机(可多次 / 逗号分隔)")
+	cmd.Flags().StringVar(&group, "group", "", "目标分组(hosts.yaml 中的 group)")
+	cmd.Flags().IntVarP(&concurrency, "concurrency", "c", 0, "并发度(0 = 默认 5)")
+	cmd.Flags().DurationVarP(&timeout, "timeout", "t", 0, "单机超时(0 = 无超时)")
+	cmd.Flags().StringVar(&shell, "shell", "", "覆盖主机的 shell 设定")
 	return cmd
+}
+
+// printExecBlock 打印一台机器的执行块(=== host === 风格,便于人读与机器解析)。
+func printExecBlock(cmd *cobra.Command, r *protocol.ExecResult) {
+	out := cmd.OutOrStdout()
+	errOut := cmd.ErrOrStderr()
+	fmt.Fprintf(out, "=== %s ===\n", r.Host)
+	if r.Stdout != "" {
+		fmt.Fprint(out, r.Stdout)
+		if !strings.HasSuffix(r.Stdout, "\n") {
+			fmt.Fprintln(out)
+		}
+	}
+	if r.Stderr != "" {
+		fmt.Fprint(errOut, r.Stderr)
+		if !strings.HasSuffix(r.Stderr, "\n") {
+			fmt.Fprintln(errOut)
+		}
+	}
+	if r.Err != "" {
+		fmt.Fprintf(errOut, "[连接错误] %s\n", r.Err)
+		return
+	}
+	if r.ExitCode != 0 {
+		fmt.Fprintf(out, "[退出码 %d]\n", r.ExitCode)
+	}
+}
+
+// failedHosts 从结果中挑出失败(连接错误或非零退出码)的主机名。
+func failedHosts(results []protocol.ExecResult) []string {
+	var out []string
+	for _, r := range results {
+		if r.Err != "" || r.ExitCode != 0 {
+			out = append(out, r.Host)
+		}
+	}
+	return out
 }

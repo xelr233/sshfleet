@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -32,6 +33,8 @@ type Server struct {
 	addr string
 
 	handshakes atomic.Int64 // 成功完成的 SSH 握手次数(用于断言连接复用)
+	active     atomic.Int64 // 当前活动会话数
+	maxActive  atomic.Int64 // 峰值并发会话数(用于断言并发度上限)
 	mu         sync.Mutex
 	conns      []net.Conn
 	closed     atomic.Bool
@@ -101,6 +104,9 @@ func (s *Server) Port() int {
 // Handshakes 返回成功握手次数。
 func (s *Server) Handshakes() int64 { return s.handshakes.Load() }
 
+// MaxConcurrent 返回峰值并发会话数(用于断言 batch 的并发度上限)。
+func (s *Server) MaxConcurrent() int64 { return s.maxActive.Load() }
+
 // Close 停止服务器并断开所有活动连接。
 func (s *Server) Close() {
 	if s.closed.Swap(true) {
@@ -159,11 +165,14 @@ func (s *Server) handleConn(nc net.Conn) {
 	sconn.Close()
 }
 
-// handleSession 实现最小 exec 语义,足以驱动 pool / exec 的测试:
+// handleSession 实现最小 exec 语义,足以驱动 pool / exec / batch / dist 的测试:
 //
 //	"exit N"      → 退出码 N
 //	"stderr"      → stdout "out" + stderr "err"
 //	"sleep"       → 保持会话不返回(用于测试超时 / channel 占用)
+//	"delay N"     → 睡眠 N 毫秒后退出 0(用于测试并发度与慢机)
+//	"fail"        → 退出码 1 且 stderr 有内容
+//	"sftp"        → 转入 SFTP 子系统(见 sftp.go)
 //	其它          → 原样回显到 stdout,退出码 0
 func (s *Server) handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 	defer ch.Close()
@@ -172,14 +181,29 @@ func (s *Server) handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 		case "exec":
 			cmd := parseCommand(req.Payload)
 			req.Reply(true, nil)
+			n := s.active.Add(1)
+			defer s.active.Add(-1)
+			for { // 记录峰值并发(atomic max)
+				cur := s.maxActive.Load()
+				if n <= cur || s.maxActive.CompareAndSwap(cur, n) {
+					break
+				}
+			}
 			switch {
 			case strings.HasPrefix(cmd, "exit "):
 				code, _ := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(cmd, "exit ")))
 				writeExitStatus(ch, code)
+			case strings.HasPrefix(cmd, "delay "):
+				ms, _ := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(cmd, "delay ")))
+				time.Sleep(time.Duration(ms) * time.Millisecond)
+				writeExitStatus(ch, 0)
 			case cmd == "stderr":
 				ch.Write([]byte("out\n"))
 				ch.Stderr().Write([]byte("err\n"))
 				writeExitStatus(ch, 0)
+			case cmd == "fail":
+				ch.Stderr().Write([]byte("boom\n"))
+				writeExitStatus(ch, 1)
 			case cmd == "sleep":
 				// 不回复退出状态,让客户端阻塞(由测试主动取消)。
 				<-chanDone(reqs)

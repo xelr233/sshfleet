@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,7 +30,7 @@ func startTestDaemon(t *testing.T) *Daemon {
 	t.Cleanup(srv.Close)
 
 	cfgPath := filepath.Join(home, "hosts.yaml")
-	yaml := fmt.Sprintf("hosts:\n  h1:\n    addr: %s\n    port: %d\n    user: %s\n    password: %s\n",
+	yaml := fmt.Sprintf("hosts:\n  h1:\n    addr: %s\n    port: %d\n    user: %s\n    password: %s\ngroups:\n  all:\n    - h1\n",
 		srv.Host(), srv.Port(), sshtest.User, sshtest.Password)
 	if err := os.WriteFile(cfgPath, []byte(yaml), 0o600); err != nil {
 		t.Fatalf("写 hosts.yaml: %v", err)
@@ -190,5 +191,71 @@ func TestDaemonUnknownCommand(t *testing.T) {
 	}
 	if resp.Err() == nil {
 		t.Fatal("未实现的命令应返回错误响应")
+	}
+}
+
+// batch 走 group 解析 + 并发执行:逐机进度事件先到,汇总响应后到。
+func TestDaemonBatchGroupWithEvents(t *testing.T) {
+	startTestDaemon(t)
+	c, err := Dial()
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close()
+
+	var events []protocol.ExecResult
+	var mu sync.Mutex
+	resp, err := c.DoEvents(context.Background(), protocol.CmdBatch, protocol.BatchParams{
+		Sel:     protocol.HostSel{Group: "all"},
+		Command: "ping",
+	}, func(ev *protocol.Event) {
+		if ev.Event == protocol.EventProgress {
+			var er protocol.ExecResult
+			if err := ev.Bind(&er); err == nil {
+				mu.Lock()
+				events = append(events, er)
+				mu.Unlock()
+			}
+		}
+	})
+	if err != nil {
+		t.Fatalf("batch: %v", err)
+	}
+	if err := resp.Err(); err != nil {
+		t.Fatalf("batch 返回错误: %v", err)
+	}
+	var res protocol.BatchResult
+	if err := resp.Bind(&res); err != nil {
+		t.Fatalf("解析 batch: %v", err)
+	}
+	if res.Total != 1 || res.OK != 1 || res.Failed != 0 {
+		t.Fatalf("汇总不符: %+v", res)
+	}
+	if len(res.Results) != 1 || res.Results[0].Stdout != "echo:ping\n" {
+		t.Fatalf("逐机结果不符: %+v", res.Results)
+	}
+	if len(events) == 0 {
+		t.Fatal("应至少收到一条逐机进度事件")
+	}
+}
+
+// batch 的未知分组应作为参数错误返回。
+func TestDaemonBatchUnknownGroup(t *testing.T) {
+	startTestDaemon(t)
+	c, err := Dial()
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close()
+
+	resp, err := c.Do(context.Background(), protocol.CmdBatch, protocol.BatchParams{
+		Sel:     protocol.HostSel{Group: "nope"},
+		Command: "hi",
+	})
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if resp.Err() == nil {
+		t.Fatal("未知分组应返回错误")
 	}
 }

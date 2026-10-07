@@ -66,7 +66,9 @@ type BatchParams struct {
 	Sel         HostSel       `json:"sel"`
 	Command     string        `json:"command"`
 	Concurrency int           `json:"concurrency,omitempty"` // 0 = 默认 5
-	Timeout     time.Duration `json:"timeout,omitempty"`
+	Timeout     time.Duration `json:"timeout,omitempty"`     // 单机超时
+	// Shell 覆盖各主机的 shell 设定(空 = 各用自己主机配置里的值)。
+	Shell string `json:"shell,omitempty"`
 }
 
 // BatchResult 是多机执行结果:逐机结果数组 + 汇总。

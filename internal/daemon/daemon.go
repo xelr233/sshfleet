@@ -91,8 +91,8 @@ func (d *Daemon) Listen() error {
 	port := ln.Addr().(*net.TCPAddr).Port
 
 	// 连接池只在 daemon 进程内存在,是「一次握手、多次复用」的载体。
-	p := newPool(d.opts.ConfigPath, d.opts.Logf)
-	d.router = NewRouter(p, d.opts.Version)
+	p, cfg := newPool(d.opts.ConfigPath, d.opts.Logf)
+	d.router = NewRouter(p, cfg, d.opts.Version)
 	d.router.onTaskStart = func() { d.activeTasks.Add(1) }
 	d.router.onTaskEnd = func() { d.activeTasks.Add(-1) }
 
@@ -298,8 +298,24 @@ func (c *clientConn) serve() {
 }
 
 // dispatch 路由单条请求并把结果写回。
+//
+// emit 把任务进度事件写回本连接(以请求 id 关联);事件与响应共用写锁,
+// 保证每条消息完整、不交错。写事件失败(客户端已断开)只记日志,不影响任务本身。
 func (c *clientConn) dispatch(ctx context.Context, req *protocol.Request) {
-	resp := c.daemon.router.Handle(ctx, req)
+	emit := func(event string, data any) error {
+		ev, err := protocol.NewEvent(req.ID, event, data)
+		if err != nil {
+			return err
+		}
+		c.wmu.Lock()
+		defer c.wmu.Unlock()
+		if err := c.writer.WriteEvent(ev); err != nil {
+			return err
+		}
+		return c.writer.Flush()
+	}
+
+	resp := c.daemon.router.Handle(ctx, req, emit)
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
 	if err := c.writer.WriteResponse(resp); err != nil {

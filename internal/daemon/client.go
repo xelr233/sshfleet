@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/xelr233/sshfleet/internal/protocol"
@@ -19,6 +20,8 @@ type Client struct {
 	conn   net.Conn
 	reader *protocol.Reader
 	writer *protocol.Writer
+
+	nextID atomic.Uint64 // 自增请求 id(同一连接可并发多个请求,响应按 id 关联)
 }
 
 // Dial 连接正在运行的 daemon:读取端口与 token 文件、建立 TCP 连接并完成 token 握手。
@@ -62,9 +65,17 @@ func (c *Client) handshake(token string) error {
 // Close 关闭连接。
 func (c *Client) Close() error { return c.conn.Close() }
 
-// Do 发送一条请求并等待其响应(忽略途中收到的事件)。
+// Do 发送一条请求并等待其响应(途中收到的事件被丢弃)。
 func (c *Client) Do(ctx context.Context, cmd protocol.Command, params any) (*protocol.Response, error) {
-	req, err := protocol.NewRequest(1, cmd, params)
+	return c.DoEvents(ctx, cmd, params, nil)
+}
+
+// DoEvents 发送一条请求并等待其响应;途中收到的每个事件都交给 onEvent
+// (onEvent 为 nil 时丢弃)。onEvent 在独立的读 goroutine 中调用,必须自行保证
+// 并发安全,且不得阻塞过久以免拖慢后续响应读取。
+func (c *Client) DoEvents(ctx context.Context, cmd protocol.Command, params any, onEvent func(*protocol.Event)) (*protocol.Response, error) {
+	id := c.nextID.Add(1)
+	req, err := protocol.NewRequest(id, cmd, params)
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +100,10 @@ func (c *Client) Do(ctx context.Context, cmd protocol.Command, params any) (*pro
 				return
 			}
 			if ev != nil {
-				continue // 简单请求场景忽略事件(M2/M3 会改为分发处理)
+				if onEvent != nil {
+					onEvent(ev)
+				}
+				continue
 			}
 			ch <- result{resp, nil}
 			return
