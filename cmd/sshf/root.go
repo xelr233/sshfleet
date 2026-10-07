@@ -17,6 +17,7 @@ CLI 是无状态薄客户端:连接本机 daemon(未运行时自动拉起,或 --
 所有 SSH 逻辑都在 daemon 中,CLI 与 daemon 之间走 127.0.0.1 TCP + token 的 JSON 行协议。`,
 		SilenceUsage: true,
 	}
+	root.PersistentFlags().StringVar(&configPath, "config", "", "hosts.yaml 路径(默认 ~/.sshfleet/hosts.yaml)")
 	root.AddCommand(
 		newStartCmd(),
 		newStopCmd(),
@@ -34,9 +35,10 @@ CLI 是无状态薄客户端:连接本机 daemon(未运行时自动拉起,或 --
 	return root
 }
 
-// notImplemented 是 M0 骨架阶段各子命令的占位执行体。
-func notImplemented(name string) func(cmd *cobra.Command, args []string) error {
+// notImplemented 是尚未落地命令的占位执行体。
+// name 是命令名,milestone 是计划实现的里程碑(README §9),便于 grep 追踪进度。
+func notImplemented(name, milestone string) func(cmd *cobra.Command, args []string) error {
 	return func(cmd *cobra.Command, args []string) error {
-		return fmt.Errorf("%s: 尚未实现", name)
+		return fmt.Errorf("TODO(%s): %s 尚未实现(见 README §9)", milestone, name)
 	}
 }

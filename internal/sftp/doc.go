@@ -1,2 +1,4 @@
-// Package sftp — 见 README §4 目录结构规划,按里程碑逐个落地。
+// Package sftp 实现单机 upload/download(pkg/sftp,带进度回调)。
+//
+// TODO(M6): 尚未实现(进度回调);基础传输可提前到 M1 之后作为 distribute 的验证前置。
 package sftp

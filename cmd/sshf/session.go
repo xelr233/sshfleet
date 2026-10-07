@@ -12,24 +12,24 @@ func newSessionCmd() *cobra.Command {
 			Use:   "open <host>",
 			Short: "打开会话,返回 session_id",
 			Args:  cobra.ExactArgs(1),
-			RunE:  notImplemented("session open"),
+			RunE:  notImplemented("session open", "M4"),
 		},
 		&cobra.Command{
 			Use:   "send <id> <input>",
 			Short: "向会话写入输入,回输出",
 			Args:  cobra.ExactArgs(2),
-			RunE:  notImplemented("session send"),
+			RunE:  notImplemented("session send", "M4"),
 		},
 		&cobra.Command{
 			Use:   "close <id>",
 			Short: "关闭会话",
 			Args:  cobra.ExactArgs(1),
-			RunE:  notImplemented("session close"),
+			RunE:  notImplemented("session close", "M4"),
 		},
 		&cobra.Command{
 			Use:   "list",
 			Short: "列出活动会话",
-			RunE:  notImplemented("session list"),
+			RunE:  notImplemented("session list", "M4"),
 		},
 	)
 	return cmd
@@ -40,6 +40,6 @@ func newTailCmd() *cobra.Command {
 		Use:   "tail <host> <file>",
 		Short: "流式跟随远端文件(tail -f 类,断线重连不丢事件)",
 		Args:  cobra.ExactArgs(2),
-		RunE:  notImplemented("tail"),
+		RunE:  notImplemented("tail", "M4"),
 	}
 }

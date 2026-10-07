@@ -151,6 +151,9 @@ sshf mcp                              # stdio 模式启动 MCP server
 
 > 约定：每个里程碑独立提交（commit），完成标准 = 构建通过 + 验收项手动可验。开发环境为 Windows + Git Bash，交叉编译目标 `windows/amd64, linux/amd64, darwin/arm64`。
 
+**进度**：M0 ✅ 已完成（commit `faff127`：go.mod + cobra 命令树 + 目录骨架）。
+「第一梯队」✅ 已完成：`protocol` / `config` / `auth`（仅私钥文件部分，ssh-agent 留 M1）。M1–M6 均未开始，代码中未完成处已用 `TODO(Mx)` 标注，可用 `rg 'TODO\(M'` 汇总。
+
 **M0 — 骨架**
 初始化 go.mod、cobra 命令树、目录结构、CI 可选。验收：`sshf --help` 完整命令树。
 
