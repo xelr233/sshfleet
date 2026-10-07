@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -31,6 +32,11 @@ type Server struct {
 	ln   net.Listener
 	cfg  *ssh.ServerConfig
 	addr string
+
+	// Root 是 SFTP 子系统的本地根目录(虚拟 "/"),为空则用当前工作目录。
+	Root string
+	// Throttle 非空时为 SFTP 写入注入限速(模拟慢机),见 throttle.go。
+	Throttle *Throttle
 
 	handshakes atomic.Int64 // 成功完成的 SSH 握手次数(用于断言连接复用)
 	active     atomic.Int64 // 当前活动会话数
@@ -181,45 +187,73 @@ func (s *Server) handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 		case "exec":
 			cmd := parseCommand(req.Payload)
 			req.Reply(true, nil)
-			n := s.active.Add(1)
-			defer s.active.Add(-1)
-			for { // 记录峰值并发(atomic max)
-				cur := s.maxActive.Load()
-				if n <= cur || s.maxActive.CompareAndSwap(cur, n) {
-					break
-				}
-			}
-			switch {
-			case strings.HasPrefix(cmd, "exit "):
-				code, _ := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(cmd, "exit ")))
-				writeExitStatus(ch, code)
-			case strings.HasPrefix(cmd, "delay "):
-				ms, _ := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(cmd, "delay ")))
-				time.Sleep(time.Duration(ms) * time.Millisecond)
-				writeExitStatus(ch, 0)
-			case cmd == "stderr":
-				ch.Write([]byte("out\n"))
-				ch.Stderr().Write([]byte("err\n"))
-				writeExitStatus(ch, 0)
-			case cmd == "fail":
-				ch.Stderr().Write([]byte("boom\n"))
-				writeExitStatus(ch, 1)
-			case cmd == "sleep":
-				// 不回复退出状态,让客户端阻塞(由测试主动取消)。
-				<-chanDone(reqs)
-				return
-			default:
-				ch.Write([]byte("echo:" + cmd + "\n"))
-				writeExitStatus(ch, 0)
-			}
-			ch.Close()
+			s.runExec(ch, cmd, reqs)
 			return
 		case "shell":
 			req.Reply(true, nil)
+		case "subsystem":
+			if parseSubsystem(req.Payload) != "sftp" {
+				req.Reply(false, nil)
+				continue
+			}
+			req.Reply(true, nil)
+			s.serveSFTP(ch)
+			return
 		default:
 			req.Reply(false, nil)
 		}
 	}
+}
+
+// runExec 执行一条测试命令并写入退出状态。
+func (s *Server) runExec(ch ssh.Channel, cmd string, reqs <-chan *ssh.Request) {
+	// 统计活动/峰值并发(供 batch 并发度、distribute 慢机等测试断言)。
+	n := s.active.Add(1)
+	defer s.active.Add(-1)
+	for {
+		cur := s.maxActive.Load()
+		if n <= cur || s.maxActive.CompareAndSwap(cur, n) {
+			break
+		}
+	}
+
+	switch {
+	case strings.HasPrefix(cmd, "exit "):
+		code, _ := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(cmd, "exit ")))
+		writeExitStatus(ch, code)
+	case strings.HasPrefix(cmd, "delay "):
+		ms, _ := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(cmd, "delay ")))
+		time.Sleep(time.Duration(ms) * time.Millisecond)
+		writeExitStatus(ch, 0)
+	case cmd == "stderr":
+		ch.Write([]byte("out\n"))
+		ch.Stderr().Write([]byte("err\n"))
+		writeExitStatus(ch, 0)
+	case cmd == "fail":
+		ch.Stderr().Write([]byte("boom\n"))
+		writeExitStatus(ch, 1)
+	case cmd == "sleep":
+		// 不回复退出状态,让客户端阻塞(由测试主动取消)。
+		<-chanDone(reqs)
+		return
+	default:
+		ch.Write([]byte("echo:" + cmd + "\n"))
+		writeExitStatus(ch, 0)
+	}
+	ch.Close()
+}
+
+// serveSFTP 在通道上跑 SFTP 子系统;Root 非空时把它作为虚拟 "/"。
+func (s *Server) serveSFTP(ch ssh.Channel) {
+	opts := []sftp.ServerOption{}
+	if s.Root != "" {
+		opts = append(opts, sftp.WithServerWorkingDirectory(s.Root))
+	}
+	svr, err := newThrottledServer(ch, s.Throttle, opts...)
+	if err != nil {
+		return
+	}
+	_ = svr.Serve()
 }
 
 // chanDone 在请求通道关闭(会话结束)时返回。
@@ -235,6 +269,16 @@ func chanDone(reqs <-chan *ssh.Request) chan struct{} {
 
 // parseCommand 从 exec 请求负载中取出命令行(前 4 字节为长度)。
 func parseCommand(payload []byte) string {
+	return parseSSHString(payload)
+}
+
+// parseSubsystem 从 subsystem 请求负载中取出子系统名。
+func parseSubsystem(payload []byte) string {
+	return parseSSHString(payload)
+}
+
+// parseSSHString 解析 SSH 字符串定长编码(uint32 长度 + 内容)。
+func parseSSHString(payload []byte) string {
 	if len(payload) < 4 {
 		return ""
 	}

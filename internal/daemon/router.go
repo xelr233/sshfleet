@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/xelr233/sshfleet/internal/config"
+	"github.com/xelr233/sshfleet/internal/dist"
 	"github.com/xelr233/sshfleet/internal/exec"
 	"github.com/xelr233/sshfleet/internal/pool"
 	"github.com/xelr233/sshfleet/internal/protocol"
@@ -41,8 +42,15 @@ type Router struct {
 // taskEntry 是一个活动任务。dist 非 nil 时为 distribute 任务(可查询逐机进度)。
 type taskEntry struct {
 	summary protocol.TaskSummary
+	dist    *dist.Task
 	cancel  context.CancelFunc
+	// finishedAt 在任务结束后置为非零,用于过期清理(保留一段时间便于查询终态)。
+	finishedAt time.Time
 }
+
+// finishedTaskRetention 是已完成任务在内存中保留的时长,便于客户端在任务结束后
+// 仍能查询到终态;超过后在下一次 dist_start 时被清理。
+const finishedTaskRetention = 10 * time.Minute
 
 // NewRouter 装配路由。cfg 用于把 group / 主机名解析成主机集合;version 用于 status。
 func NewRouter(p *pool.Pool, cfg *config.File, version string) *Router {
@@ -107,6 +115,12 @@ func (r *Router) route(ctx context.Context, req *protocol.Request, emit EmitFunc
 		return r.exec(ctx, req)
 	case protocol.CmdBatch:
 		return r.batch(ctx, req, emit)
+	case protocol.CmdDistStart:
+		return r.distStart(ctx, req, emit)
+	case protocol.CmdDistStatus:
+		return r.distStatus(req)
+	case protocol.CmdDistCancel:
+		return r.distCancel(req)
 	default:
 		return protocol.Fail(req.ID, protocol.CodeBadRequest, "未知命令 %q", req.Cmd), nil
 	}
@@ -245,6 +259,118 @@ func (r *Router) batch(ctx context.Context, req *protocol.Request, emit EmitFunc
 	return protocol.OK(req.ID, res)
 }
 
+// distStart 启动一次分发:解析目标、登记任务、异步执行并立即返回 task_id。
+//
+// 分发是长任务:进度通过 EventProgress 事件持续推回本连接,结果通过
+// dist_status 查询(或等待 EventDistDone)。
+func (r *Router) distStart(ctx context.Context, req *protocol.Request, emit EmitFunc) (*protocol.Response, error) {
+	var p protocol.DistStartParams
+	if err := req.Bind(&p); err != nil {
+		return protocol.Fail(req.ID, protocol.CodeBadRequest, "%v", err), nil
+	}
+	if p.LocalPath == "" || p.RemotePath == "" {
+		return protocol.Fail(req.ID, protocol.CodeBadRequest, "dist_start 需要 local_path 与 remote_path"), nil
+	}
+	hosts, err := r.resolve(p.Sel)
+	if err != nil {
+		return protocol.Fail(req.ID, protocol.CodeBadRequest, "%v", err), nil
+	}
+	if len(hosts) == 0 {
+		return protocol.Fail(req.ID, protocol.CodeBadRequest, "dist_start 未选中任何主机"), nil
+	}
+
+	r.pruneFinished()
+	id := fmt.Sprintf("dist-%d", r.taskSeq.Add(1))
+
+	task := dist.NewTask(id, hosts, dist.Options{
+		LocalPath:   p.LocalPath,
+		RemotePath:  p.RemotePath,
+		Concurrency: p.Concurrency,
+		Resume:      p.Resume,
+		Mkdir:       true,
+		OnProgress: func(hp dist.HostProgress) {
+			// 每台机器到达终态(完成/失败)时推一次事件;过程中不刷屏,
+			// 需要实时进度的客户端改成轮询 dist_status。
+			if emit != nil && (hp.State == dist.StateDone || hp.State == dist.StateFailed) {
+				_ = emit(protocol.EventDistDone, toDistHostState(hp))
+			}
+		},
+	})
+
+	e := &taskEntry{
+		summary: protocol.TaskSummary{ID: id, Kind: "distribute", Total: len(hosts)},
+		dist:    task,
+		cancel:  task.Cancel,
+	}
+	r.addTask(id, e)
+
+	go func() {
+		task.Run(r.pool)
+		r.mu.Lock()
+		if cur := r.tasks[id]; cur != nil {
+			_, hps, done, _ := task.Progress()
+			_ = hps
+			cur.summary.Done = done
+			cur.finishedAt = time.Now()
+		}
+		r.mu.Unlock()
+		if r.onTaskEnd != nil {
+			r.onTaskEnd()
+		}
+	}()
+
+	out := protocol.DistStartResult{TaskID: id, Total: len(hosts)}
+	return protocol.OK(req.ID, out)
+}
+
+// distStatus 返回某分发任务的逐机进度(终态在保留期内仍可查询)。
+func (r *Router) distStatus(req *protocol.Request) (*protocol.Response, error) {
+	var p protocol.DistStatusParams
+	if err := req.Bind(&p); err != nil {
+		return protocol.Fail(req.ID, protocol.CodeBadRequest, "%v", err), nil
+	}
+	r.mu.Lock()
+	e := r.tasks[p.TaskID]
+	r.mu.Unlock()
+	if e == nil || e.dist == nil {
+		return protocol.Fail(req.ID, protocol.CodeNotFound, "未知分发任务 %q", p.TaskID), nil
+	}
+
+	state, hps, done, failed := e.dist.Progress()
+	out := protocol.DistStatusResult{
+		TaskID: p.TaskID, State: state, Done: done, Failed: failed,
+		Hosts: make([]protocol.DistHostState, 0, len(hps)),
+	}
+	for _, hp := range hps {
+		out.Hosts = append(out.Hosts, toDistHostState(hp))
+	}
+	return protocol.OK(req.ID, out)
+}
+
+// distCancel 取消一个分发任务(幂等)。
+func (r *Router) distCancel(req *protocol.Request) (*protocol.Response, error) {
+	var p protocol.DistStatusParams
+	if err := req.Bind(&p); err != nil {
+		return protocol.Fail(req.ID, protocol.CodeBadRequest, "%v", err), nil
+	}
+	r.mu.Lock()
+	e := r.tasks[p.TaskID]
+	r.mu.Unlock()
+	if e == nil || e.dist == nil {
+		return protocol.Fail(req.ID, protocol.CodeNotFound, "未知分发任务 %q", p.TaskID), nil
+	}
+	e.dist.Cancel()
+	return protocol.OK(req.ID, map[string]string{"task_id": p.TaskID, "state": "canceled"})
+}
+
+// toDistHostState 把 dist 的内部进度映射为协议层结构。
+func toDistHostState(hp dist.HostProgress) protocol.DistHostState {
+	return protocol.DistHostState{
+		Host: hp.Host, State: string(hp.State),
+		Offset: hp.Offset, Total: hp.Total, Err: hp.Err,
+	}
+}
+
 // startTask 登记一个活动任务并返回其 id。cancel 非 nil 时随 daemon 关闭一并取消。
 func (r *Router) startTask(kind string, total int, cancel context.CancelFunc) string {
 	id := fmt.Sprintf("%s-%d", kind, r.taskSeq.Add(1))
@@ -258,6 +384,28 @@ func (r *Router) startTask(kind string, total int, cancel context.CancelFunc) st
 		r.onTaskStart()
 	}
 	return id
+}
+
+// addTask 登记一个已构造好的任务条目并触发活动计数。
+func (r *Router) addTask(id string, e *taskEntry) {
+	r.mu.Lock()
+	r.tasks[id] = e
+	r.mu.Unlock()
+	if r.onTaskStart != nil {
+		r.onTaskStart()
+	}
+}
+
+// pruneFinished 清理超过保留期的已完成任务(在每次新建长任务时调用)。
+func (r *Router) pruneFinished() {
+	cutoff := time.Now().Add(-finishedTaskRetention)
+	r.mu.Lock()
+	for id, e := range r.tasks {
+		if !e.finishedAt.IsZero() && e.finishedAt.Before(cutoff) {
+			delete(r.tasks, id)
+		}
+	}
+	r.mu.Unlock()
 }
 
 // setTaskProgress 更新任务的完成数(供 status 展示)。
