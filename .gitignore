@@ -1,0 +1,12 @@
+# Binaries
+/sshf
+/sshf.exe
+/dist/
+
+# Go
+*.test
+*.out
+
+# Runtime state
+token
+*.pid
