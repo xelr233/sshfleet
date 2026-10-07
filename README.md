@@ -1,8 +1,8 @@
 # sshfleet
 
-> SSH 多机管理 CLI daemon：常驻进程持有连接池，提供多机批量执行、并发文件分发、长连接会话，附带 MCP 适配器供 AI Agent 使用。
+> SSH 多机管理 CLI daemon：常驻进程持有连接池，提供多机批量执行、并发文件分发、长连接会话、SFTP 传输。MCP 适配器（供 AI Agent 使用）规划中、尚未实现。
 
-本文档同时是**项目说明**和**Agent 开发计划指导**。Agent 按本文档的里程碑顺序开发，每个里程碑的验收标准见 §9。
+本文档同时是**项目说明**和**开发计划**。里程碑与完成情况见 §9。
 
 ---
 
@@ -18,7 +18,7 @@
 - 长连接 shell 会话（cd / 环境变量延续）、流式跟随（tail -f 类）
 - SFTP 单机上传/下载
 - 常驻连接池，空闲超时自动退出
-- MCP server（stdio）暴露上述能力给 AI Agent
+- MCP server（stdio）暴露上述能力给 AI Agent（**规划中，未实现**）
 
 **非目标**
 
@@ -35,7 +35,7 @@
 | SSH | `golang.org/x/crypto/ssh` |
 | SFTP | `github.com/pkg/sftp` |
 | CLI | `spf13/cobra` |
-| MCP | `github.com/modelcontextprotocol/go-sdk`（官方 Go SDK，stdio 传输） |
+| MCP | `github.com/modelcontextprotocol/go-sdk`（官方 Go SDK，stdio 传输）— **未实现，未引入依赖** |
 | 并发控制 | `golang.org/x/sync/errgroup` + `golang.org/x/sync/semaphore` |
 | 配置 | `gopkg.in/yaml.v3` |
 | Windows agent | `github.com/Microsoft/go-winio`（dial OpenSSH agent named pipe） |
@@ -47,33 +47,35 @@
 ┌─ 本机（任意 OS）────────────────────────────┐      ┌ 目标机（只需 sshd）┐
 │                                            │      │                    │
 │  Agent / 用户                              │      │   ┌─────────────┐  │
-│    ├─ CLI (sshm) ──┐                       │      │   │ host A sshd  │  │
+│    ├─ CLI (sshf) ──┐                       │      │   │ host A sshd  │  │
 │    └─ MCP server ──┤→ 127.0.0.1:port →│ daemon │──┤   │ host B sshd  │  │
 │                    ┘   (JSON 行协议+token) │ 连接池  │   │ host C sshd  │  │
 └────────────────────────────────────────────┘      └─────────────┘
 ```
 
 - **daemon** 是唯一持有 SSH 连接和凭据的进程。启动时监听 TCP、写 token 文件，空闲（无客户端、无活动任务）超时自杀。
-- **CLI / MCP** 是无状态薄客户端：连 daemon、发请求、收结果。daemon 未运行时，CLI 可用 `sshm start` 拉起（默认行为），或 `--no-daemon` 单次直连（一次性任务，不走连接池）。
+- **CLI / MCP** 是无状态薄客户端：连 daemon、发请求、收结果。daemon 未运行时，CLI 自动用 `sshf start` 拉起。
 
-## 4. 目录结构（规划）
+## 4. 目录结构
 
 ```
 sshfleet/
-├── cmd/sshf/            # cobra 入口：root / start / stop / status / exec / batch /
+├── cmd/sshf/            # cobra 入口：root / start / stop / status / hosts / exec / batch /
 │                        # distribute / session / tail / upload / download / mcp
 ├── internal/
-│   ├── daemon/          # 监听、token 鉴权、请求路由、空闲退出、PID/端口文件
-│   ├── protocol/        # 请求/响应结构体、JSON 行编解码（daemon 与客户端共用）
+│   ├── daemon/          # 监听、token 鉴权、请求路由、订阅推送、空闲退出、PID/端口文件
+│   ├── protocol/        # 请求/响应/事件结构体、JSON 行编解码（daemon 与客户端共用）
 │   ├── pool/            # 连接池：dial、保活(keepalive)、断线重连退避、并发上限
-│   ├── exec/            # exec / batch（errgroup+semaphore）、逐机超时与结果聚合
-│   ├── session/         # shell 会话（channel 生命周期、cd/env 延续、send）
-│   ├── dist/            # distribute：io.Pipe 扇出、逐机进度、断点续传、失败重试
-│   ├── sftp/            # 单机 upload/download（pkg/sftp，带进度回调）
-│   ├── tail/            # 流式跟随（长驻通道，多客户端订阅）
+│   ├── exec/            # exec / batch（errgroup+semaphore）、逐机超时与结果聚合、shell 包装
+│   ├── session/         # 持久 shell 会话（PTY、cd/env 延续、订阅输出）
+│   ├── dist/            # distribute：有界管道扇出、逐机进度、断点续传
+│   ├── sftp/            # 单机 upload/download（pkg/sftp，带进度回调、offset 续传）
+│   ├── tail/            # 流式跟随（环形缓冲、seq 游标、多客户端订阅）
+│   ├── encoding/        # 远端输出编码（UTF-8 优先、GBK 兜底）
 │   ├── auth/            # 密钥加载（OpenSSH 格式）、agent 适配（unix socket / winio pipe）
 │   ├── config/          # hosts.yaml 加载校验、token/PID 文件路径（~/.sshfleet/）
-│   └── mcp/             # MCP server，工具函数 = protocol 客户端调用
+│   ├── sshtest/         # 测试专用进程内 SSH 服务端（exec/shell/tail/sftp + 限速）
+│   └── mcp/             # MCP server（未实现，占位）
 ├── go.mod
 └── README.md
 ```
@@ -113,12 +115,12 @@ CLI 子命令与 MCP 工具一一映射到上述协议命令，**不在 CLI/MCP 
 sshf start / stop / status
 sshf hosts add/list/rm/test           # test = 对清单逐一连通性检查
 sshf exec <host> <cmd>
-sshf batch --group web [-c 8] <cmd>   # 输出：逐机块 + 汇总统计（成功/失败/耗时）
-sshf distribute <local> <host|--group> <remote> [--concurrency 16] [--resume]
-sshf upload / download <host> <local> <remote>
+sshf batch [--host h]... [--group g] [-c 8] <cmd>   # 输出：逐机块 + 汇总统计
+sshf distribute <local> <remote> [--host h]... [--group g] [--concurrency 16] [--resume]
+sshf upload <host> <local> <remote> / download <host> <remote> <local>
 sshf session open <host> / send <id> <input> / close <id> / list
-sshf tail <host> <file>
-sshf mcp                              # stdio 模式启动 MCP server
+sshf tail <host> <file> [--task <id> --since <seq>]  # --task/--since 用于断线重连
+sshf mcp                              # stdio 模式启动 MCP server（未实现，占位）
 ```
 
 ## 8. GoSSHa 代码参考指引
@@ -148,58 +150,50 @@ sshf mcp                              # stdio 模式启动 MCP server
 
 辅助参考：[windvalley/gossh](https://github.com/windvalley/gossh)（MIT，活跃）——不是 daemon，但它的 CLI 参数体系是 batch 场景的成熟答案，照抄语义：`-c/--concurrency`（默认 5）、`-t/--timeout`（单机）、`-l/--hostlist` 文件、逐机输出块格式 `=== host === `、失败机器汇总重跑提示。二开/搬代码均可（MIT）。
 
-## 9. 里程碑（Agent 执行计划）
+## 9. 里程碑与进度
 
-> 约定：每个里程碑独立提交（commit），完成标准 = 构建通过 + 验收项手动可验。开发环境为 Windows + Git Bash，交叉编译目标 `windows/amd64, linux/amd64, darwin/arm64`。
+> 约定：每个里程碑独立提交（commit），完成标准 = 构建通过 + 验收项手动可验。开发环境为 Windows + Git Bash；交叉编译目标 `windows/amd64, linux/amd64, darwin/arm64`。
 
-**进度**：M0 ✅ 已完成（commit `faff127`：go.mod + cobra 命令树 + 目录骨架）。
-「第一梯队」✅ 已完成：`protocol` / `config` / `auth`（仅私钥文件部分，ssh-agent 留 M1）。M1–M4、M6 已完成；**M5（MCP server）按需求判定为非必要，暂不做**，代码中以 `TODO(M5)` 保留占位。可用 `rg 'TODO\(M'` 汇总。
+| 里程碑 | 内容 | 状态 | commit |
+|---|---|---|---|
+| M0 | 骨架：go.mod / cobra 命令树 / 目录结构 | ✅ | `faff127` |
+| — | 第一梯队：`protocol` / `config` / `auth`（私钥部分） | ✅ | `6f13860` |
+| M1 | 连接池 + daemon + 单机 exec（含 ssh-agent） | ✅ | `5823ce3` |
+| M2 | batch：errgroup+semaphore 并发、逐机超时、结果聚合 | ✅ | `9b9efff` |
+| M3 | distribute：有界管道扇出、逐机进度、offset 续传 | ✅ | `81fd6e8` |
+| M4 | session + tail：持久 shell、环形缓冲订阅 | ✅ | `8e2b327` |
+| M5 | MCP server（stdio） | ⏸ 暂缓（按需求判定非必要） | — |
+| M6 | upload/download、hosts test、GBK 解码 | ✓ 部分 | `9ad9643` |
 
-**M1 ✅ 已完成**（commit `5823ce3`）：`config`（`shell` 字段）、`auth`（ssh-agent 双平台 + 降级、`ClientConfig` 组装）、`pool`（连接池：dial 去重 / keepalive / 退避重连 / 每主机 channel 限流）、`daemon`（TCP + token + JSON 行路由 + 空闲退出 + PID/端口/token 文件）、`exec`（单机 exec）、CLI 的 `start`/`stop`/`status`/`exec`（daemon 未运行时自动拉起）。验收方式：`internal/sshtest` 提供进程内 SSH 服务器，`pool`/`exec`/`daemon` 的集成测试覆盖「21 次取连接仅 1 次握手」「断线后自动重连并计数」「channel 上限」「超时」等；另有对真实 sshd（本机 `ssh win`）的手工验证。
+**测试**：105 项通过，`-race` 干净，三平台交叉编译通过。
 
-**M1 与 README 原案的差异**：
-- **默认 shell**：不硬编码 `/bin/bash -c`，默认原样交给目标机登录 shell；`shell` 字段 / `--shell` 可显式指定（见 §5.10）。这是原案未覆盖、但 Windows 目标必需的一点。
-- Host key 校验暂用 `InsecureIgnoreHostKey`（known_hosts 校验按原计划留 M6）。
-- `daemon --foreground` 对子进程用平台特定的 detach（Unix `setsid`，Windows `CREATE_NEW_PROCESS_GROUP + DETACHED_PROCESS`）。
+### 实现说明与原案的差异
 
-**M2 ✅ 已完成**（commit `9b9efff`）：`exec.RunBatch`（`errgroup` + `semaphore` 并发、逐机独立超时、结果按名排序聚合；单机失败不中断其它机器）、`daemon` 的 `batch` 路由（`group`/主机选择集解析 + 逐机 `EventProgress` 事件流）、CLI `batch`（`=== host ===` 逐机块 + 汇总统计，有失败则退出码 1）。验收：进程内测试断言「5 台 `-c 2` 时服务端峰值并发 ≤ 2」与「逐机超时不互相影响」；并已在真实环境（gost 多端口代理本机 sshd，见下）跑通 3 台并发。
+- **默认 shell（M1）**：不硬编码 `/bin/bash -c`，默认把命令原样交给目标机登录 shell（同 `ssh host cmd`）；`shell` 字段 / `--shell` 可显式指定 `auto/bash/sh/cmd/powershell/pwsh`，见 §5.10。这是 Windows 目标必需的一点。
+- **host key 校验（M1）**：暂用 `InsecureIgnoreHostKey`，known_hosts 校验未做。
+- **daemon 子进程 detach（M1）**：平台特定（Unix `setsid`，Windows `CREATE_NEW_PROCESS_GROUP + DETACHED_PROCESS`）。
+- **distribute 扇出（M3）**：未用 `io.Pipe`（无缓冲，慢机经广播器会拖住快机），改用**带预读窗口（4 MiB）的有界内存管道**；并发度只限制建连、不限制消费（限制消费会反压广播器而死锁）。
+- **session（M4）**：`open` 时先请求 PTY —— Windows OpenSSH 对非 PTY 的 shell 请求会直接断开；`Close` 先关 stdin 并给收尾设上限，避免个别 sshd 不回 exit-status 时把请求挂死。
+- **GBK 解码（M4/M6）**：`internal/encoding.ToUTF8`，UTF-8 优先、GBK 兜底，应用于 exec / session / tail 输出。
+- **M6 按需求跳过**：`--no-daemon` 直连模式、交叉编译脚本、goreleaser。
+- **M5 暂缓**：`cmd/sshf/mcp.go` 与 `internal/mcp/doc.go` 保留 `TODO(M5)` 占位；`internal/protocol` 已是 CLI/MCP 共用契约，实现 MCP 只需映射协议命令，不涉及 SSH 逻辑。
 
-**M3 ✅ 已完成**（commit `81fd6e8`）：`internal/sftp`（单机 `Put`/`Get`，带节流进度回调、`Offset` 断点续传；每个会话占用一个 channel 名额）、`internal/dist`（**有界内存管道 + 广播者**：磁盘只读一次、chunk 扇出到每机独立管道，管道缓冲即流控边界，慢机只堵自己；`Task` 自包含 `Progress`/`Wait`/`Cancel`；并发度只限建连不限消费，避免反压死锁）、`daemon` 的 `dist_start`/`dist_status`/`dist_cancel`（异步长任务 + `EventDistDone` 事件 + 终态保留 10 分钟可查）、CLI `distribute`（`--host`/`--group`/`--concurrency`/`--resume`，轮询进度 + 逐机汇总）。验收：进程内 `TestSlowHostDoesNotBlockOthers` 直接断言「限速慢机完成前，快机均已完成且内容一致」；真实环境 8 MiB 分发 3 台，限速机（~1 MB/s）仍在 43% 时另两台已 100% 完成，md5 校验一致；`--resume` 从远端半截文件续传后 md5 一致。
+### 验收方式
 
-**验收环境（M2/M3 真实节）**：本机 OpenSSH `sshd` 为 SYSTEM 服务、不可随意重启或另起实例，故用 `E:\gost_3.3.0_windows_amd64\gost.exe` 把**同一个 sshd** 代理成多个本地端口当作多机 —— `127.0.0.1:2201`/`2202` 全速，`2203` 加 `limiter=1MB` 模拟慢机；`hosts.yaml` 里 `sim1/sim2/sim3` 指向这三个端口。注意：该 sshd 的 `C:\ProgramData\ssh\sshd_config` 原本缺 `Subsystem sftp sftp-server.exe`，需补上并重启 sshd 后 SFTP 才可用。M2/M3 完成时测试 87 项、`-race` 干净、三平台交叉编译通过。
+- **进程内**：`internal/sshtest` 提供进程内 SSH 服务端（exec / 持久 shell / tail 流 / SFTP + 入站限速），覆盖连接复用、断线重连并计数、channel 限流、batch 并发上限、distribute「慢机不阻塞快机」、tail 断线重连不丢事件、session `cd` 延续等。
+- **真实机**：本机 OpenSSH `sshd` 为 SYSTEM 服务、不可随意重启或另起实例，故用 `gost` 把**同一个 sshd** 代理成多个本地端口当多机（`2201`/`2202` 全速，`2203` 加 `limiter=1MB` 模拟慢机）。注意该 sshd 的 `sshd_config` 需含 `Subsystem sftp sftp-server.exe` 才能使用 SFTP。
 
-**M4 ✅ 已完成**（commit `8e2b327`）：`internal/session`（`session.Shell()` 持久 shell，`cd`/环境变量延续；**open 时先请求 PTY** —— Windows OpenSSH 对非 PTY 的 shell 请求会直接断开；`Close` 先关 stdin 并给收尾设上限，避免个别 sshd 不回 exit-status 时把请求挂死）、`internal/tail`（远端 `tail -f` + **环形缓冲**（2000 行）+ 带 `seq` 游标订阅，重连带 `--since` 从缓冲补回缺口，不丢不重）、`daemon`（连接级订阅表 `Event`/`AddSub`/`DelSub`，连接断开统一取消；`session_open/send/close/list` 与 `tail_start/stop` 路由；`client.Stream` 长驻读循环）、`internal/encoding`（`ToUTF8`：UTF-8 优先、GBK 兜底）、CLI `session open/send/close/list` 与 `tail --task/--since/--for`。验收：进程内测试覆盖「`cd` 后 `pwd` 反映新目录」「环形缓冲有界」「断线重连序号连续无缺口」「多订阅者」；真实机验证 `cd /c/Windows` 后 `pwd` 返回 `/c/Windows`、`tail` 跟随实时文件按 `seq` 输出。
+### 剩余工作
 
-**M6 ✅ 已完成（部分）**（commit `9ad9643`）：`internal/sftp` 单机传输已提前在 M3 落地，M6 补齐 CLI 侧与打磨 —— `upload`/`download`（进度事件在 stderr 原地刷新）、`hosts test`（逐机建连 + 认证，OK/耗时 或 FAIL/原因，含不可达主机时退出码 1）、`exec` 输出的 **GBK 兜底解码**。**按需求跳过**：`--no-daemon` 直连模式、三平台交叉编译脚本、goreleaser。验收：真实机 `upload`→`download` 往返 md5 一致、`hosts test` 逐机输出、`tail` 跟随；进程内覆盖 GBK 解码、`hosts_test` 可达/不可达、`sftp` 回环 + 进度事件。全部 105 项测试通过、`-race` 干净。
-
-**M5（MCP server）— 暂缓**：按需求判定为非必要。`cmd/sshf/mcp.go` 与 `internal/mcp/doc.go` 保留 `TODO(M5)` 占位；协议层（`internal/protocol`）已是 CLI/MCP 共用的唯一契约，未来实现 MCP 只需在 `internal/mcp` 映射到协议命令，不涉及 SSH 逻辑改动。
-
-**M0 — 骨架**
-初始化 go.mod、cobra 命令树、目录结构、CI 可选。验收：`sshf --help` 完整命令树。
-
-**M1 — 连接池 + 单机 exec**
-`config`（hosts.yaml）、`auth`（密钥 + agent 双平台）、`pool`（含 keepalive/重连/singleflight）、`daemon`（TCP+token+JSON 行协议）+ `exec`。验收：daemon 常驻，`sshf exec` 走池内连接连续执行 20 条命令，观察仅 1 次握手；kill 目标 sshd 连接后自动重连。
-
-**M2 — batch**
-`errgroup` + semaphore 并发、逐机超时、结果聚合输出、失败清单。验收：5 台（可用本地 sshd 容器代替）并发执行，输出逐机块 + 汇总；并发数 -c 生效。
-
-**M3 — distribute（本项目核心难点）**
-pipe 扇出、逐机进度、offset 续传、`dist_status`/`dist_cancel`。验收：100MB 文件分发 5 台，慢机（`tc` 限速或小内存容器）不阻塞其他机器；中断后 `--resume` 只补未完成机器。
-
-**M4 — session + tail**
-shell channel 会话管理、cd/env 延续、事件推送、多客户端订阅 tail。验收：`session open` 后 `send "cd /tmp"` 再 `send "pwd"` 输出 `/tmp`；`tail` 客户端断开重连不丢已推事件（环形缓冲）。
-
-**M5 — MCP server**
-官方 Go SDK，工具映射 §6 全部命令，stdio 模式。验收：在 MCP 客户端（如 ZCode）中完成"对 group 执行命令 → 分发文件 → 查询进度"闭环。
-
-**M6 — 打磨**
-`sftp upload/download` 进度、`hosts test`、GBK 兜底解码、`--no-daemon` 直连模式、三平台交叉编译 + goreleaser。
+- **M5 — MCP server**：官方 Go SDK，stdio，工具映射 §6 全部命令。验收：在 MCP 客户端（如 ZCode）中完成「对 group 执行命令 → 分发文件 → 查询进度」闭环。
+- known_hosts 校验；`--no-daemon` 直连；打包（交叉编译 + goreleaser）。
 
 ## 10. 风险与已知坑（开发中随时对照）
 
-1. `x/crypto/ssh` 无"高级会话对象"：shell 会话的窗口/信号/输出切分都要自己写（M4 工作量容易低估）。
-2. Windows ssh-agent 的 named pipe 需 go-winio 手动 dial（`\\.\pipe\openssh-ssh-agent`），且要求 ssh-agent 服务已启动——`auth` 包要做优雅降级并给出可读错误。
+1. `x/crypto/ssh` 无"高级会话对象"：shell 会话的窗口/信号/输出切分都要自己写（M4 已落地：PTY + 静默边界 + 收尾上限）。
+2. Windows ssh-agent 的 named pipe 需 go-winio 手动 dial（`\\.\pipe\openssh-ssh-agent`），且要求 ssh-agent 服务已启动——`auth` 包已做优雅降级并给出可读错误。
 3. `pkg/sftp` 并发写单文件：distribute 每机只开一个写句柄，chunk 顺序写，勿并发写同一文件。
-4. 大量机器分发时监听端 fd 上限（Windows 无 ulimit 问题，Linux 侧 daemon 生命周期文档提示）。
-5. 远程编码：目标 Windows 主机 GBK 输出在 M6 前会乱码，属已知限制。
+4. 大量机器分发时 fd 上限：每主机并发 SSH channel 受 `pool` 的 `MaxChannels`（默认 4）约束；Linux 侧 daemon 生命周期文档提示。
+5. 远程编码：目标 Windows 主机 GBK 输出已由 `internal/encoding.ToUTF8`（UTF-8 优先、GBK 兜底）处理。
 6. token 文件与 hosts.yaml 权限：Windows 下用 ACL 收紧（至少当前用户），Unix 0600。
+7. 已知未做：host key 校验（当前 `InsecureIgnoreHostKey`）、`--no-daemon` 直连、MCP server。

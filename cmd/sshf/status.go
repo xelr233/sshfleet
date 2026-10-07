@@ -12,7 +12,7 @@ import (
 // printStatus 渲染 status 结果:版本/运行时长 + 连接池表 + 活动任务。
 func printStatus(cmd *cobra.Command, st *protocol.StatusResult) {
 	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "sshm daemon  v%s   运行 %s\n", st.Version, st.Uptime)
+	fmt.Fprintf(out, "sshf daemon  v%s   运行 %s\n", st.Version, st.Uptime)
 
 	if len(st.Pool) == 0 {
 		fmt.Fprintln(out, "\n连接池: 空(尚无主机被访问)")

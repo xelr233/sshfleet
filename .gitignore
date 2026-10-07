@@ -1,12 +1,26 @@
-# Binaries
+# --- 构建产物 ---
 /sshf
 /sshf.exe
+/sshfleet
+/sshfleet.exe
 /dist/
+*.exe~
 
-# Go
+# --- 测试 / 覆盖率 ---
 *.test
 *.out
+coverage.*
+*.prof
 
-# Runtime state
+# --- 本地运行状态（daemon 的 PID/端口/token 文件）---
+.sshfleet/
 token
 *.pid
+
+# --- 编辑器 / 系统 ---
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
