@@ -4,7 +4,6 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
-	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -111,9 +110,12 @@ func TestExpandPath(t *testing.T) {
 func TestAuthMethodsPriority(t *testing.T) {
 	p := genKey(t, t.TempDir(), "id_ed25519", "")
 	h := &config.Host{Name: "x", User: "u", Addr: "h", Key: p, Password: "pw"}
-	methods, err := AuthMethods(h)
+	methods, warnings, err := AuthMethods(h)
 	if err != nil {
 		t.Fatalf("AuthMethods: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("不应有告警, got %v", warnings)
 	}
 	// key 在前、password 在后(agent 未启用)。
 	if len(methods) != 2 {
@@ -123,7 +125,7 @@ func TestAuthMethodsPriority(t *testing.T) {
 
 func TestAuthMethodsPasswordOnly(t *testing.T) {
 	h := &config.Host{Name: "x", User: "u", Addr: "h", Password: "pw"}
-	methods, err := AuthMethods(h)
+	methods, _, err := AuthMethods(h)
 	if err != nil {
 		t.Fatalf("AuthMethods: %v", err)
 	}
@@ -134,16 +136,34 @@ func TestAuthMethodsPasswordOnly(t *testing.T) {
 
 func TestAuthMethodsNoCredentials(t *testing.T) {
 	h := &config.Host{Name: "x", User: "u", Addr: "h"}
-	if _, err := AuthMethods(h); err == nil {
+	if _, _, err := AuthMethods(h); err == nil {
 		t.Fatal("无凭据应报错")
 	}
 }
 
-func TestAuthMethodsAgentNotImplemented(t *testing.T) {
+// agent 不可用但同时配了密码时,应降级继续并给出告警,而不是整体失败(README §10.2)。
+func TestAuthMethodsAgentDegradesToPassword(t *testing.T) {
 	h := &config.Host{Name: "x", User: "u", Addr: "h", Agent: true, Password: "pw"}
-	_, err := AuthMethods(h)
-	if !errors.Is(err, ErrAgentNotImplemented) {
-		t.Fatalf("agent 未实现应返回标记错误, got %v", err)
+	methods, warnings, err := AuthMethods(h)
+	if err != nil {
+		t.Fatalf("agent 不可用但密码可用时应降级成功: %v", err)
+	}
+	if len(methods) != 1 {
+		t.Fatalf("降级后应只剩密码认证, got %d", len(methods))
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("应给出 1 条降级告警, got %v", warnings)
+	}
+	if !strings.Contains(warnings[0], "agent") {
+		t.Fatalf("告警应提及 agent, got %q", warnings[0])
+	}
+}
+
+// agent 是唯一凭据且不可用时,才应整体失败。
+func TestAuthMethodsAgentOnlyUnavailableIsFatal(t *testing.T) {
+	h := &config.Host{Name: "x", User: "u", Addr: "h", Agent: true}
+	if _, _, err := AuthMethods(h); err == nil {
+		t.Fatal("agent 是唯一凭据且不可用时应报错")
 	}
 }
 

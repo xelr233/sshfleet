@@ -30,6 +30,29 @@ type Host struct {
 	Password   string   `yaml:"password,omitempty"`   // 明文密码
 	Agent      bool     `yaml:"agent,omitempty"`      // 允许走 ssh-agent
 	Cipher     []string `yaml:"cipher,omitempty"`     // 协商优先级覆盖(空=默认)
+
+	// Shell 指定执行命令所用的 shell,取值见 ShellXxx 常量。
+	// 默认 ShellAuto:把命令原样交给目标机的登录 shell —— 这与 `ssh host cmd`
+	// 行为一致,也是唯一不假设目标平台的选项(Windows 默认 cmd.exe,
+	// 装了 Git Bash 的 Windows 可能是 bash,Linux 通常是 bash/sh)。
+	Shell string `yaml:"shell,omitempty"`
+}
+
+// 命令执行所用的 shell。除 ShellAuto 外,均会把命令作为脚本喂给对应解释器,
+// 从而绕开跨 shell 的引号差异(见 internal/exec/shell.go)。
+const (
+	ShellAuto       = "auto"       // 原样交给登录 shell(默认)
+	ShellBash       = "bash"       // bash -s
+	ShellSh         = "sh"         // sh -s
+	ShellCmd        = "cmd"        // cmd /c
+	ShellPowerShell = "powershell" // powershell -Command -
+	ShellPwsh       = "pwsh"       // pwsh -Command -
+)
+
+// shellKinds 是合法的 Shell 取值集合(空串等同 ShellAuto)。
+var shellKinds = map[string]bool{
+	"": true, ShellAuto: true, ShellBash: true, ShellSh: true,
+	ShellCmd: true, ShellPowerShell: true, ShellPwsh: true,
 }
 
 // File 是 hosts.yaml 的根结构。
@@ -107,6 +130,9 @@ func mergeDefaults(h, d *Host) {
 	if len(h.Cipher) == 0 {
 		h.Cipher = d.Cipher
 	}
+	if h.Shell == "" {
+		h.Shell = d.Shell
+	}
 }
 
 // Validate 检查配置的完整性与引用一致性,并补齐隐式默认值。
@@ -129,6 +155,9 @@ func (f *File) Validate() error {
 		}
 		if h.User == "" {
 			return fmt.Errorf("config: 主机 %q 未指定 user,且无法取当前用户", name)
+		}
+		if !shellKinds[h.Shell] {
+			return fmt.Errorf("config: 主机 %q 的 shell=%q 非法(可选: auto/bash/sh/cmd/powershell/pwsh)", name, h.Shell)
 		}
 	}
 	for group, members := range f.Groups {

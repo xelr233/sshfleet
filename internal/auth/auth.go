@@ -19,35 +19,44 @@ import (
 // AuthMethods 按优先级组装主机的认证方式:agent > 私钥 > 密码。
 // 至少需要一种凭据,否则返回错误(而不是让 SSH 握手时给出含糊的失败)。
 //
-// 注意:返回的切片顺序即 ssh 客户端的尝试顺序。
-func AuthMethods(h *config.Host) ([]ssh.AuthMethod, error) {
+// 返回的切片顺序即 ssh 客户端的尝试顺序。warnings 收集非致命降级信息
+// (例如 agent 未启动但私钥可用),由调用方决定是否展示。
+func AuthMethods(h *config.Host) (methods []ssh.AuthMethod, warnings []string, err error) {
 	if h == nil {
-		return nil, fmt.Errorf("auth: 主机配置为空")
+		return nil, nil, fmt.Errorf("auth: 主机配置为空")
 	}
-	var methods []ssh.AuthMethod
 
 	if h.Agent {
-		am, err := agentMethods()
-		if err != nil {
-			return nil, err
+		am, aerr := agentMethods()
+		if aerr != nil {
+			// agent 不可用:若还有别的凭据则降级继续并告警,否则视为致命错误。
+			if h.Key == "" && h.Password == "" {
+				return nil, nil, aerr
+			}
+			warnings = append(warnings, aerr.Error())
+		} else {
+			methods = append(methods, am...)
 		}
-		methods = append(methods, am...)
 	}
 	if h.Key != "" {
-		signer, err := LoadSigner(h.Key, h.Passphrase)
-		if err != nil {
-			return nil, err
+		signer, kerr := LoadSigner(h.Key, h.Passphrase)
+		if kerr != nil {
+			if len(methods) == 0 && h.Password == "" {
+				return nil, nil, kerr
+			}
+			warnings = append(warnings, kerr.Error())
+		} else {
+			methods = append(methods, ssh.PublicKeys(signer))
 		}
-		methods = append(methods, ssh.PublicKeys(signer))
 	}
 	if h.Password != "" {
 		methods = append(methods, ssh.Password(h.Password))
 	}
 
 	if len(methods) == 0 {
-		return nil, fmt.Errorf("auth: 主机 %q 未配置任何凭据(agent / key / password)", h.Name)
+		return nil, warnings, fmt.Errorf("auth: 主机 %q 未配置任何凭据(agent / key / password)", h.Name)
 	}
-	return methods, nil
+	return methods, warnings, nil
 }
 
 // ExpandPath 展开路径开头的 ~(仅当前用户),返回绝对或原样路径。

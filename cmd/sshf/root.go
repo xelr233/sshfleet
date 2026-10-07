@@ -15,7 +15,8 @@ func newRootCmd() *cobra.Command {
 
 CLI 是无状态薄客户端:连接本机 daemon(未运行时自动拉起,或 --no-daemon 单次直连),
 所有 SSH 逻辑都在 daemon 中,CLI 与 daemon 之间走 127.0.0.1 TCP + token 的 JSON 行协议。`,
-		SilenceUsage: true,
+		SilenceUsage:  true,
+		SilenceErrors: true, // 错误由 main 统一打印,避免与退出码处理重复输出
 	}
 	root.PersistentFlags().StringVar(&configPath, "config", "", "hosts.yaml 路径(默认 ~/.sshfleet/hosts.yaml)")
 	root.AddCommand(

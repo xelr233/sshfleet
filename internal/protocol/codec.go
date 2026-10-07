@@ -117,6 +117,16 @@ func (r *Reader) readLine() ([]byte, error) {
 	return bytes.TrimRight(line, "\r\n"), nil
 }
 
+// ReadTokenLine 在协议握手阶段读取一行原始文本(即 token)。
+// 它复用同一个底层 bufio.Reader,因此握手后继续用它读请求不会丢失已缓冲的字节。
+func (r *Reader) ReadTokenLine() (string, error) {
+	line, err := r.readLine()
+	if err != nil {
+		return "", err
+	}
+	return string(line), nil
+}
+
 // ReadRequest 读一条请求。返回值可能是 io.EOF。空行被忽略。
 func (r *Reader) ReadRequest() (*Request, error) {
 	for {

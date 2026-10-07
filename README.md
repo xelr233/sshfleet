@@ -89,6 +89,7 @@ sshfleet/
 7. **凭据**：hosts.yaml 支持私钥路径 / 密文密码（daemon 启动时解密） / 引用 ssh-agent。密码明文落盘时启动告警。Windows 下 ssh-agent 走 `\\.\pipe\openssh-ssh-agent`（go-winio dial），Unix 走 `SSH_AUTH_SOCK`。
 8. **重连**：连接池内连接断开时指数退避重连（100ms 起、×2、封顶 30s），对上层透明；任务执行中连接断开则该机任务失败并返回明确错误，由 batch/distribute 层决定重试。
 9. **远程 Windows 目标机**：输出解码 UTF-8 优先、GBK 兜底（M1 不做，见里程碑顺序）。
+10. **默认 shell**：exec/batch 默认**不包裹命令**，把命令原样交给目标机的登录 shell（与 `ssh host cmd` 一致）。目标可能是 Windows `cmd.exe`、PowerShell，也可能是 bash/sh，因此**禁止硬编码 `/bin/bash -c`**。需要确定性 shell 时用主机配置的 `shell` 字段或 `exec --shell` 指定（`auto`/`bash`/`sh`/`cmd`/`powershell`/`pwsh`）；除 `auto` 与 `cmd` 外，命令作为脚本经 stdin 喂给解释器，避免跨 shell 的引号与转义差异（见 `internal/exec/shell.go`）。
 
 ## 6. 协议命令集（v1）
 
@@ -153,6 +154,13 @@ sshf mcp                              # stdio 模式启动 MCP server
 
 **进度**：M0 ✅ 已完成（commit `faff127`：go.mod + cobra 命令树 + 目录骨架）。
 「第一梯队」✅ 已完成：`protocol` / `config` / `auth`（仅私钥文件部分，ssh-agent 留 M1）。M1–M6 均未开始，代码中未完成处已用 `TODO(Mx)` 标注，可用 `rg 'TODO\(M'` 汇总。
+
+**M1 ✅ 已完成**：`config`（`shell` 字段）、`auth`（ssh-agent 双平台 + 降级、`ClientConfig` 组装）、`pool`（连接池：dial 去重 / keepalive / 退避重连 / 每主机 channel 限流）、`daemon`（TCP + token + JSON 行路由 + 空闲退出 + PID/端口/token 文件）、`exec`（单机 exec）、CLI 的 `start`/`stop`/`status`/`exec`（daemon 未运行时自动拉起）。验收方式：`internal/sshtest` 提供进程内 SSH 服务器，`pool`/`exec`/`daemon` 的集成测试覆盖「21 次取连接仅 1 次握手」「断线后自动重连并计数」「channel 上限」「超时」等；另有对真实 sshd（本机 `ssh win`）的手工验证。测试 63 项通过、`-race` 干净。
+
+**M1 与 README 原案的差异**：
+- **默认 shell**：不硬编码 `/bin/bash -c`，默认原样交给目标机登录 shell；`shell` 字段 / `--shell` 可显式指定（见 §5.10）。这是原案未覆盖、但 Windows 目标必需的一点。
+- Host key 校验暂用 `InsecureIgnoreHostKey`（known_hosts 校验按原计划留 M6）。
+- `daemon --foreground` 对子进程用平台特定的 detach（Unix `setsid`，Windows `CREATE_NEW_PROCESS_GROUP + DETACHED_PROCESS`）。
 
 **M0 — 骨架**
 初始化 go.mod、cobra 命令树、目录结构、CI 可选。验收：`sshf --help` 完整命令树。

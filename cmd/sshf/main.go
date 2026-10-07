@@ -1,11 +1,32 @@
 package main
 
-import "os"
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
+)
 
 var version = "0.1.0"
 
 func main() {
-	if err := newRootCmd().Execute(); err != nil {
-		os.Exit(1)
+	// 顶层 context:收到 Ctrl-C / SIGTERM 时取消,daemon 前台模式据此优雅退出。
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	err := newRootCmd().ExecuteContext(ctx)
+	if err == nil {
+		return
 	}
+
+	// 远端命令的非零退出码直接作为本进程退出码(便于脚本判断),不再打印错误。
+	var ec *exitCodeError
+	if errors.As(err, &ec) {
+		os.Exit(ec.code)
+	}
+
+	fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	os.Exit(1)
 }

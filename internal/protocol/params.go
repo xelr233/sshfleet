@@ -45,6 +45,8 @@ type ExecParams struct {
 	Host    string        `json:"host"`
 	Command string        `json:"command"`
 	Timeout time.Duration `json:"timeout,omitempty"` // 0 = 用 daemon 默认
+	// Shell 覆盖主机配置里的 shell 设定(空 = 用主机配置,通常为 auto)。
+	Shell string `json:"shell,omitempty"`
 }
 
 // ExecResult 是单机执行结果。
