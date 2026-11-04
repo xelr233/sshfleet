@@ -91,6 +91,7 @@ sshf tail web-1 /var/log/app.log --for 5
 ## 坑与注意
 
 - **SFTP 相关命令(distribute/upload/download)要求目标 sshd 启用 `Subsystem sftp`**。报错 `subsystem request failed` 时,让用户在其 sshd_config 里加 `Subsystem sftp <path>` 并重启 sshd。
+- **Git Bash 会改写远端路径**:MSYS2 把 `/tmp/a.zip` 自动转成 `C:/Users/<你>/AppData/Local/Temp/a.zip`(参数转换发生在 sshf 启动之前,daemon 收到的已是改写后的值)。SFTP 会把它当相对路径写到服务器的 `/root/C:/Users/...` 而命令仍"成功"。sshf 在 Git Bash 下遇到 Windows 形式远端会直接报错:用 `MSYS2_ARG_CONV_EXCL='*' sshf ...` 或 `MSYS_NO_PATHCONV=1 sshf ...` 关闭转换;目标确为 Windows 主机时加 `--allow-windows-remote`。`exec`/`tail` 的路径参数同样会被转换,但会以"文件不存在"暴露,不易静默出错。
 - **目标 sshd 重启后,daemon 里是陈旧连接** → 先 `sshf stop` 再重试,强制重新握手。
 - **`hosts add` 缺字段会交互式提示**。agent 场景请把字段用标志一次性给齐(`--addr/--user/--port/--key/--agent/--password/--group`),否则会等待输入。`hosts import` 完全非交互。
 - **凭据优先级:agent > key > password**。没有 key/agent 时才会用密码;写明文 `--password` 会落盘并告警——优先用私钥或 ssh-agent。

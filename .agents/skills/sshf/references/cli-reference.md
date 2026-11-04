@@ -81,6 +81,7 @@ daemon 空闲(无客户端、无活动任务)会自动退出。**任何命令在
 | `--group <g>` | — | 目标分组 |
 | `--concurrency <n>` | 16 | 并发度(只限制建连) |
 | `--resume` | false | 对远端已有文件从 offset 续传 |
+| `--allow-windows-remote` | false | 远端路径确是 Windows 形式(目标是 Windows 主机)时放行 |
 
 也支持三参数写法 `distribute <local> <host> <remote>` 指定单台(此时 `remote` 是最后一个参数,`<host>` 是中间参数)。
 
@@ -88,7 +89,15 @@ daemon 空闲(无客户端、无活动任务)会自动退出。**任何命令在
 
 单机 SFTP 传输,进度在 stderr 原地刷新,结束时 stdout 打印 `host: 传输 <大小>,耗时 <时长>`。
 
+标志:`--allow-windows-remote`(默认 false)—— 目标为 Windows 主机、远端路径就是 `C:/...` 时打开。
+
 > SFTP 要求目标 sshd 启用 `Subsystem sftp`。
+
+> **远端路径写 POSIX 形式。** 在 Git Bash / MSYS2 里,`/tmp/a.zip` 会被自动改写成
+> `C:/Users/<你>/AppData/Local/Temp/a.zip`;SFTP 会把它当相对路径写到服务器的
+> `/root/C:/Users/...`,`/tmp/a.zip` 被静默忽略。sshf 会拦下这种远端并提示,
+> 用 `MSYS2_ARG_CONV_EXCL='*' sshf upload ...`(或 `MSYS_NO_PATHCONV=1`)关闭转换;
+> 改用 PowerShell / cmd 或原生 `scp` 也不会被转换。
 
 ## 会话与跟随
 

@@ -18,6 +18,7 @@ func newDistributeCmd() *cobra.Command {
 		group       string
 		concurrency int
 		resume      bool
+		allowWin    bool
 	)
 	cmd := &cobra.Command{
 		Use:   "distribute <local> <remote> [--host h]... [--group g]",
@@ -39,6 +40,9 @@ distribute <local> <host> <remote> 指定单台。
 			}
 			if len(hosts) == 0 && group == "" {
 				return fmt.Errorf("distribute: 需指定 --host 或 --group(或用 <local> <host> <remote> 三参数写法)")
+			}
+			if err := guardRemotePath("distribute", local, remote, allowWin); err != nil {
+				return err
 			}
 
 			c, err := ensureDaemon(cmd)
@@ -78,6 +82,8 @@ distribute <local> <host> <remote> 指定单台。
 	cmd.Flags().StringVar(&group, "group", "", "目标分组")
 	cmd.Flags().IntVar(&concurrency, "concurrency", 0, "并发度(0 = 默认 16)")
 	cmd.Flags().BoolVar(&resume, "resume", false, "对已有远端文件从 offset 续传")
+	cmd.Flags().BoolVar(&allowWin, "allow-windows-remote", false,
+		"允许远端路径为 Windows 形式(目标为 Windows 主机时使用)")
 	return cmd
 }
 

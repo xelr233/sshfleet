@@ -132,6 +132,8 @@ sshf mcp                              # stdio 模式启动 MCP server（未实�
 
 CLI 界面（用法/帮助/补全/参数与选项报错）与命令说明均为中文；`sshf --help` 即完整中文命令树。
 
+> **远端路径必须写 POSIX 形式**。Git Bash / MSYS2 会在启动 sshf 前把 `/tmp/a.zip` 这类参数自动改写成 `C:/Users/<你>/AppData/Local/Temp/a.zip`，CLI 收到的已不是用户敲的字符串 —— 照原样传输会把文件写进服务器当前目录下的相对路径（`/root/C:/Users/...`），而 `/tmp/a.zip` 被静默忽略。sshf 会拦下这种 Windows 形式远端并给出绕过办法（`MSYS2_ARG_CONV_EXCL='*'`）；目标确为 Windows 主机时加 `--allow-windows-remote`。详见 §10。
+
 > **给 AI Agent**：仓库内置 skill `.agents/skills/sshf/`（`SKILL.md` + `references/cli-reference.md`），可在支持 skills 的 Agent（如 ZCode）中直接指导多机运维；`references/cli-reference.md` 也适合人读的命令/标志/字段权威参考。
 
 ### 7.1 从 OpenSSH 配置导入
@@ -184,7 +186,7 @@ CLI 界面（用法/帮助/补全/参数与选项报错）与命令说明均为�
 | M5 | MCP server（stdio） | ⏸ 暂缓（按需求判定非必要） | — |
 | M6 | upload/download、hosts test、GBK 解码 | ✓ 部分 | `9ad9643` |
 
-**测试**：126 项通过，`-race` 干净，三平台交叉编译通过。
+**测试**：135 项通过，`-race` 干净，三平台交叉编译通过。
 
 **里程碑后增补（非里程碑项）**：CLI 全量中文化（用法/帮助/补全/参数与选项报错）、`hosts import`（从 `~/.ssh/config` 导入，`internal/sshconfig`）、GitHub Actions 手动发布工作流（见下「构建与发布」）。
 
@@ -228,3 +230,7 @@ go build -trimpath -ldflags "-s -w -X main.version=0.2.0" -o dist/sshf ./cmd/ssh
 5. 远程编码：目标 Windows 主机 GBK 输出已由 `internal/encoding.ToUTF8`（UTF-8 优先、GBK 兜底）处理。
 6. token 文件与 hosts.yaml 权限：Windows 下用 ACL 收紧（至少当前用户），Unix 0600。
 7. 已知未做：host key 校验（当前 `InsecureIgnoreHostKey`）、`--no-daemon` 直连、MCP server。
+8. Git Bash / MSYS2 的**参数自动转换**：在这类 POSIX 层里启动原生 Windows 程序前，形如 `/tmp/a.zip` 的参数会被改写成 `C:/Users/<你>/AppData/Local/Temp/a.zip`，程序收到的已经不是用户敲的字符串。
+   对 SFTP 而言后果很隐蔽：远端变成 Windows 路径后会在服务器上按相对路径写出 `/root/C:/Users/...`，命令仍然"成功"，用户以为的 `/tmp/a.zip` 根本没被写。
+   CLI 无法还原被改写的字符串，因此 `upload` / `download` / `distribute` 在 Git Bash 下遇到 Windows 形式远端会直接报错，并给出 `MSYS2_ARG_CONV_EXCL='*'` / `MSYS_NO_PATHCONV=1` 等绕过办法；目标确实是 Windows 主机时用 `--allow-windows-remote` 显式放行。
+   非 MSYS 环境（cmd / PowerShell / Linux）不做参数转换，Windows 形式远端原样放行。
