@@ -98,6 +98,7 @@ sshf tail web-1 /var/log/app.log --for 5
 - **`hosts import` 只导入具体别名**:`Host *` 通配、`Include`、`Match`、`ProxyJump`/`ProxyCommand` 会被跳过并告警;已存在的同名主机默认跳过,`--overwrite` 覆盖,`--dry-run` 只预览。
 - **默认 shell 不硬编码 bash**:命令原样交给目标登录 shell(同 `ssh host cmd`),所以 Windows 目标也能用。需要确定性 shell 时用 `--shell auto|bash|sh|cmd|powershell|pwsh` 或 hosts.yaml 的 `shell` 字段。
 - **Windows 目标输出 GBK 会自动转 UTF-8**,无需手工处理。
+- **输出里的耗时统一保留 1 位小数**:`3.4s` / `412.3ms` / `2m3.4s` / `1h2m3.4s`;协议字段 `duration`、`elapsed`、`latency`、`idle`、`uptime` 都是格式化后的字符串,可直接用正则或数值解析。
 - **隔离实验**用 `SSHFLEET_HOME=<tmpdir>` 或 `--config <tmp>/hosts.yaml`,不会污染用户真实 `~/.sshfleet/`。
 
 ## 参考

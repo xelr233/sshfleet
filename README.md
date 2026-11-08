@@ -72,6 +72,7 @@ sshfleet/
 │   ├── dist/            # distribute：有界管道扇出、逐机进度、断点续传
 │   ├── sftp/            # 单机 upload/download（pkg/sftp，带进度回调、offset 续传）
 │   ├── tail/            # 流式跟随（环形缓冲、seq 游标、多客户端订阅）
+│   ├── humanize/        # 耗时等展示格式化（耗时统计统一保留 1 位小数）
 │   ├── encoding/        # 远端输出编码（UTF-8 优先、GBK 兜底）
 │   ├── auth/            # 密钥加载（OpenSSH 格式）、agent 适配（unix socket / winio pipe）
 │   ├── config/          # hosts.yaml 加载校验、token/PID 文件路径（~/.sshfleet/）
@@ -95,7 +96,8 @@ sshfleet/
 7. **凭据**：hosts.yaml 支持私钥路径 / 密文密码（daemon 启动时解密） / 引用 ssh-agent。密码明文落盘时启动告警。Windows 下 ssh-agent 走 `\\.\pipe\openssh-ssh-agent`（go-winio dial），Unix 走 `SSH_AUTH_SOCK`。
 8. **重连**：连接池内连接断开时指数退避重连（100ms 起、×2、封顶 30s），对上层透明；任务执行中连接断开则该机任务失败并返回明确错误，由 batch/distribute 层决定重试。
 9. **远程 Windows 目标机**：输出解码 UTF-8 优先、GBK 兜底（M1 不做，见里程碑顺序）。
-10. **默认 shell**：exec/batch 默认**不包裹命令**，把命令原样交给目标机的登录 shell（与 `ssh host cmd` 一致）。目标可能是 Windows `cmd.exe`、PowerShell，也可能是 bash/sh，因此**禁止硬编码 `/bin/bash -c`**。需要确定性 shell 时用主机配置的 `shell` 字段或 `exec --shell` 指定（`auto`/`bash`/`sh`/`cmd`/`powershell`/`pwsh`）；除 `auto` 与 `cmd` 外，命令作为脚本经 stdin 喂给解释器，避免跨 shell 的引号与转义差异（见 `internal/exec/shell.go`）。
+10. **耗时展示**：所有耗时统计（exec 单机耗时、batch 逐机与总耗时、SFTP 传输耗时、hosts test 建连延迟、session 空闲时长、daemon uptime）统一走 `internal/humanize.Duration`，**最多保留 1 位小数**：不足 1 秒用毫秒（`412.3ms`），1 分钟内用秒（`3.4s`），更长用 `2m3.4s` / `1h2m3.4s`。不要直接用 `time.Duration.String()`（会输出 `1.234567ms` 这类长尾）。
+11. **默认 shell**：exec/batch 默认**不包裹命令**，把命令原样交给目标机的登录 shell（与 `ssh host cmd` 一致）。目标可能是 Windows `cmd.exe`、PowerShell，也可能是 bash/sh，因此**禁止硬编码 `/bin/bash -c`**。需要确定性 shell 时用主机配置的 `shell` 字段或 `exec --shell` 指定（`auto`/`bash`/`sh`/`cmd`/`powershell`/`pwsh`）；除 `auto` 与 `cmd` 外，命令作为脚本经 stdin 喂给解释器，避免跨 shell 的引号与转义差异（见 `internal/exec/shell.go`）。
 
 ## 6. 协议命令集（v1）
 
@@ -135,6 +137,8 @@ CLI 界面（用法/帮助/补全/参数与选项报错）与命令说明均为�
 > **远端路径必须写 POSIX 形式**。Git Bash / MSYS2 会在启动 sshf 前把 `/tmp/a.zip` 这类参数自动改写成 `C:/Users/<你>/AppData/Local/Temp/a.zip`，CLI 收到的已不是用户敲的字符串 —— 照原样传输会把文件写进服务器当前目录下的相对路径（`/root/C:/Users/...`），而 `/tmp/a.zip` 被静默忽略。sshf 会拦下这种 Windows 形式远端并给出绕过办法（`MSYS2_ARG_CONV_EXCL='*'`）；目标确为 Windows 主机时加 `--allow-windows-remote`。详见 §10。
 
 > **给 AI Agent**：仓库内置 skill `.agents/skills/sshf/`（`SKILL.md` + `references/cli-reference.md`），可在支持 skills 的 Agent（如 ZCode）中直接指导多机运维；`references/cli-reference.md` 也适合人读的命令/标志/字段权威参考。
+
+输出里的耗时统一保留 1 位小数（见 §5）：`=== 汇总 ===` 行的总耗时、SFTP 传输耗时、`hosts test` 的延迟、`session list` 的空闲时长、`status` 的运行时长都是 `3.4s` / `412.3ms` / `1m2.3s` 这种形式，便于直接对比与脚本解析。
 
 ### 7.1 从 OpenSSH 配置导入
 

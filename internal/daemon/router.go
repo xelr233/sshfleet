@@ -10,6 +10,7 @@ import (
 	"github.com/xelr233/sshfleet/internal/config"
 	"github.com/xelr233/sshfleet/internal/dist"
 	"github.com/xelr233/sshfleet/internal/exec"
+	"github.com/xelr233/sshfleet/internal/humanize"
 	"github.com/xelr233/sshfleet/internal/pool"
 	"github.com/xelr233/sshfleet/internal/protocol"
 	"github.com/xelr233/sshfleet/internal/session"
@@ -200,7 +201,7 @@ func (r *Router) status() *protocol.StatusResult {
 
 	return &protocol.StatusResult{
 		Version: r.version,
-		Uptime:  time.Since(r.started).Round(time.Second).String(),
+		Uptime:  humanize.Duration(time.Since(r.started)),
 		Pool:    out,
 		Tasks:   tasks,
 	}
@@ -222,7 +223,7 @@ func (r *Router) exec(ctx context.Context, req *protocol.Request) (*protocol.Res
 		out := protocol.ExecResult{Host: p.Host, Err: err.Error()}
 		if res != nil {
 			out.Stdout, out.Stderr, out.ExitCode = res.Stdout, res.Stderr, res.ExitCode
-			out.Duration = res.Duration.String()
+			out.Duration = humanize.Duration(res.Duration)
 		}
 		return protocol.OK(req.ID, out)
 	}
@@ -232,7 +233,7 @@ func (r *Router) exec(ctx context.Context, req *protocol.Request) (*protocol.Res
 		Stdout:   res.Stdout,
 		Stderr:   res.Stderr,
 		ExitCode: res.ExitCode,
-		Duration: res.Duration.String(),
+		Duration: humanize.Duration(res.Duration),
 	})
 }
 
@@ -263,7 +264,7 @@ func (r *Router) batch(ctx context.Context, req *protocol.Request, conn Conn) (*
 
 	res := protocol.BatchResult{
 		Total:   len(out.Results),
-		Elapsed: out.Elapsed.String(),
+		Elapsed: humanize.Duration(out.Elapsed),
 		Results: make([]protocol.ExecResult, 0, len(out.Results)),
 	}
 	for _, er := range out.Results {
@@ -272,7 +273,7 @@ func (r *Router) batch(ctx context.Context, req *protocol.Request, conn Conn) (*
 			Stdout:   er.Stdout,
 			Stderr:   er.Stderr,
 			ExitCode: er.ExitCode,
-			Duration: er.Duration.String(),
+			Duration: humanize.Duration(er.Duration),
 		}
 		if er.Err != nil {
 			pr.Err = er.Err.Error()

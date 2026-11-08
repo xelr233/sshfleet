@@ -276,6 +276,7 @@ func TestDaemonHostsTest(t *testing.T) {
 		if !byName[name].OK {
 			t.Fatalf("主机 %s 应可达: %+v", name, byName[name])
 		}
+		assertOneDecimal(t, "hosts_test latency", byName[name].Latency)
 	}
 	if byName["dead"].OK || byName["dead"].Err == "" {
 		t.Fatalf("不可达主机应 FAIL: %+v", byName["dead"])

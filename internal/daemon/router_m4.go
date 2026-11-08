@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/xelr233/sshfleet/internal/encoding"
+	"github.com/xelr233/sshfleet/internal/humanize"
 	"github.com/xelr233/sshfleet/internal/protocol"
 	"github.com/xelr233/sshfleet/internal/session"
 	"github.com/xelr233/sshfleet/internal/sftp"
@@ -90,7 +91,7 @@ func (r *Router) sessionList() *protocol.SessionListResult {
 	for _, in := range infos {
 		out = append(out, protocol.SessionInfo{
 			SessionID: in.ID, Host: in.Host, OpenedAt: in.OpenedAt,
-			Idle: in.Idle.Round(time.Second).String(),
+			Idle: humanize.Duration(in.Idle),
 		})
 	}
 	return &protocol.SessionListResult{Sessions: out}
@@ -239,7 +240,7 @@ func (r *Router) sftpTransfer(ctx context.Context, req *protocol.Request, conn C
 	} else {
 		n, err = sftpPutOne(ctx, cli, p, onProgress)
 	}
-	res := protocol.SFTPResult{Host: p.Host, Bytes: n, Duration: time.Since(start).String()}
+	res := protocol.SFTPResult{Host: p.Host, Bytes: n, Duration: humanize.Duration(time.Since(start))}
 	if err != nil {
 		res.Err = err.Error()
 	}
@@ -292,7 +293,7 @@ func (r *Router) hostsTest(ctx context.Context, req *protocol.Request) (*protoco
 			st.Err = err.Error()
 		} else {
 			st.OK = true
-			st.Latency = time.Since(t0).Round(time.Millisecond).String()
+			st.Latency = humanize.Duration(time.Since(t0))
 		}
 		out.Hosts = append(out.Hosts, st)
 	}

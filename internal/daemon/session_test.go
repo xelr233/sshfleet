@@ -53,6 +53,7 @@ func TestDaemonSessionEndToEnd(t *testing.T) {
 	if len(list.Sessions) != 1 || list.Sessions[0].SessionID != id {
 		t.Fatalf("session_list 不符: %+v", list.Sessions)
 	}
+	assertOneDecimal(t, "session idle", list.Sessions[0].Idle)
 
 	// cd /tmp
 	resp, err = c.Do(ctx, protocol.CmdSessionSend, protocol.SessionSendParams{SessionID: id, Input: "cd /tmp\n"})
@@ -260,6 +261,7 @@ func TestDaemonSFTPPutGet(t *testing.T) {
 	if res.Bytes != int64(len(data)) {
 		t.Fatalf("上传字节数应为 %d, got %d", len(data), res.Bytes)
 	}
+	assertOneDecimal(t, "sftp duration", res.Duration)
 	if progress == 0 {
 		t.Fatal("应收到进度事件")
 	}

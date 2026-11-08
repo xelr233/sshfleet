@@ -171,6 +171,20 @@ groups:
 
 CLI 与(未来的)MCP 工具一一映射到上述命令,SSH 逻辑只在 daemon 内。
 
+## 输出中的耗时字段
+
+所有耗时统计统一**保留 1 位小数**,格式随量级切换,可直接比较/解析:
+
+| 量级 | 形式 | 出现位置 |
+|---|---|---|
+| < 1s | `412.3ms` | `hosts test` 建连延迟 |
+| < 1min | `3.4s` | `exec` 单机耗时、SFTP 传输耗时 |
+| < 1h | `2m3.4s` | `batch` 汇总总耗时 |
+| ≥ 1h | `1h2m3.4s` | `status` 运行时长(daemon uptime) |
+| — | `0.0s` | `session list` 空闲时长(idle)的零值 |
+
+协议字段 `duration` / `elapsed` / `latency` / `idle` / `uptime` 都是**已格式化的字符串**,不是 `time.Duration` 的原始 String 形式(不会再出现 `1.234567891s`)。
+
 ## 退出码
 
 | 情形 | 退出码 |

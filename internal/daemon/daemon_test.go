@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -52,6 +53,29 @@ func startTestDaemon(t *testing.T) *Daemon {
 	return d
 }
 
+// assertOneDecimal 断言耗时文本最多保留 1 位小数(daemon 侧统一走 humanize.Duration,
+// 这里兜住回退成 time.Duration.String() 的情况:那会输出 "1.234567ms" 这种长尾)。
+func assertOneDecimal(t *testing.T, what, s string) {
+	t.Helper()
+	if s == "" {
+		t.Fatalf("%s 为空", what)
+	}
+	dot := strings.IndexByte(s, '.')
+	if dot < 0 {
+		return
+	}
+	n := 0
+	for _, r := range s[dot+1:] {
+		if r < '0' || r > '9' {
+			break
+		}
+		n++
+	}
+	if n != 1 {
+		t.Fatalf("%s = %q,小数位应为 1 位", what, s)
+	}
+}
+
 func TestDaemonStatusAndExec(t *testing.T) {
 	startTestDaemon(t)
 
@@ -78,6 +102,7 @@ func TestDaemonStatusAndExec(t *testing.T) {
 	if st.Version != "test" {
 		t.Fatalf("版本应为 test, got %q", st.Version)
 	}
+	assertOneDecimal(t, "status uptime", st.Uptime)
 
 	// exec
 	resp, err = c.Do(ctx, protocol.CmdExec, protocol.ExecParams{Host: "h1", Command: "ping"})
@@ -97,6 +122,7 @@ func TestDaemonStatusAndExec(t *testing.T) {
 	if er.Err != "" {
 		t.Fatalf("exec 不应有连接层错误: %q", er.Err)
 	}
+	assertOneDecimal(t, "exec duration", er.Duration)
 }
 
 // 同一连接上的多个请求必须按 id 正确关联(并发请求不错配)。
@@ -237,6 +263,8 @@ func TestDaemonBatchGroupWithEvents(t *testing.T) {
 	if len(events) == 0 {
 		t.Fatal("应至少收到一条逐机进度事件")
 	}
+	assertOneDecimal(t, "batch elapsed", res.Elapsed)
+	assertOneDecimal(t, "batch 逐机耗时", res.Results[0].Duration)
 }
 
 // batch 的未知分组应作为参数错误返回。
